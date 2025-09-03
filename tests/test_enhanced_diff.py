@@ -193,10 +193,11 @@ class TestCommitReferenceResolution:
         assert resolved == commit_hash
     
     def test_resolve_invalid_reference(self, claude_repo):
-        """Test resolving invalid reference falls back to original."""
+        """Test resolving invalid reference raises error like git."""
+        import pytest
         invalid_ref = "invalid_ref_123"
-        resolved = _resolve_commit_ref(claude_repo, invalid_ref)
-        assert resolved == invalid_ref  # Should return as-is when can't resolve
+        with pytest.raises(ValueError, match="ambiguous argument"):
+            _resolve_commit_ref(claude_repo, invalid_ref)
 
 
 class TestEnhancedDiffFiltering:
@@ -367,7 +368,9 @@ class TestCLIIntegration:
         with patch('claude_git.cli.main._find_project_root', return_value=claude_repo.project_root):
             result = runner.invoke(diff_command, [])
             assert result.exit_code == 0
-            assert "Claude Changes Analysis" in result.output
+            # Check for git-style diff format
+            assert "diff --git" in result.output
+            assert "# Claude change" in result.output
             assert "test.py" in result.output
     
     def test_diff_with_parent_hash_flag(self, claude_repo):
@@ -492,7 +495,8 @@ class TestEdgeCases:
         with patch('claude_git.cli.main._find_project_root', return_value=claude_repo.project_root):
             result = runner.invoke(diff_command, [])
             assert result.exit_code == 0
-            assert "No Claude changes found to analyze" in result.output
+            # With no changes, output should be empty (like git diff)
+            assert result.output.strip() == ""
     
     def test_diff_with_invalid_commit_hash(self, claude_repo):
         """Test diff with invalid commit hash."""
@@ -500,9 +504,8 @@ class TestEdgeCases:
         with patch('claude_git.cli.main._find_project_root', return_value=claude_repo.project_root):
             result = runner.invoke(diff_command, ['invalid_commit_hash'])
             assert result.exit_code == 0
-            # The actual behavior - invalid commit hashes are treated as paths if they don't look like commits
-            assert ("No Claude changes found to analyze" in result.output or 
-                   "No Claude changes found in this commit" in result.output)
+            # With git-style behavior, invalid commits that don't look like refs return empty output
+            assert result.output.strip() == ""
     
     def test_diff_with_empty_path_filter(self, claude_repo):
         """Test diff with path filter that matches no files."""
@@ -514,7 +517,8 @@ class TestEdgeCases:
         with patch('claude_git.cli.main._find_project_root', return_value=claude_repo.project_root):
             result = runner.invoke(diff_command, ['nonexistent_dir/'])
             assert result.exit_code == 0
-            assert "No Claude changes found to analyze" in result.output
+            # With no changes, output should be empty (like git diff)
+            assert result.output.strip() == ""
     
     def test_parse_args_with_complex_scenarios(self):
         """Test argument parsing with complex scenarios."""
@@ -573,7 +577,9 @@ class TestDefaultBehaviorChanges:
             # Should always show changes by default (verbose=True is passed internally)
             # This verifies the "shows changes by default" requirement
             assert "test.py" in result.output
-            assert "Claude Changes Analysis" in result.output
+            # Check for git-style diff format
+            assert "diff --git" in result.output
+            assert "# Claude change" in result.output
     
     def test_diff_displays_tool_information(self, claude_repo):
         """Test that diff displays tool call information."""
@@ -586,5 +592,5 @@ class TestDefaultBehaviorChanges:
             result = runner.invoke(diff_command, [])
             assert result.exit_code == 0
             
-            # Should show tool information
-            assert "Tool: Write" in result.output or "📝" in result.output
+            # Should show tool information in the change comment
+            assert "write:" in result.output

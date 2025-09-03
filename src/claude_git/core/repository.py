@@ -81,40 +81,39 @@ class ClaudeGitRepository:
         parent_repo_status = self._get_parent_repo_status()
         change.parent_repo_status = parent_repo_status
         
-        # Analyze conflicts with human changes
-        conflict_analysis = self.detect_conflicts_with_human_changes(change)
+        # GIT-NATIVE APPROACH: Store actual file content in mirrored directory structure
         
-        # Create a change record file instead of the actual file
-        change_dir = self.claude_git_dir / "changes"
-        change_dir.mkdir(exist_ok=True)
+        # Create mirrored file structure in claude-git repo
+        relative_file_path = change.file_path.relative_to(self.project_root)
+        mirrored_file = self.claude_git_dir / "files" / relative_file_path
         
-        change_file = change_dir / f"{change.id}.json"
-        change_data = {
+        # Ensure directory structure exists
+        mirrored_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Store the actual new content of the file (after Claude's change)
+        final_content = change.new_content if change.new_content else change.file_path.read_text(encoding='utf-8')
+        mirrored_file.write_text(final_content, encoding='utf-8')
+        
+        # Create minimal metadata file for reference
+        metadata_dir = self.claude_git_dir / "metadata"  
+        metadata_dir.mkdir(exist_ok=True)
+        
+        metadata_file = metadata_dir / f"{change.id}.json"
+        metadata = {
             "id": change.id,
             "timestamp": change.timestamp.isoformat(),
             "change_type": change.change_type.value,
-            "file_path": str(change.file_path),
-            "old_string": change.old_string,
-            "new_string": change.new_string,
-            "old_content": change.old_content,
-            "new_content": change.new_content,
-            "tool_input": change.tool_input,
+            "file_path": str(relative_file_path),
             "parent_repo_hash": parent_repo_hash,
-            "parent_repo_status": parent_repo_status,
-            "conflict_analysis": conflict_analysis,
+            "tool_input": change.tool_input
         }
         
-        change_file.write_text(json.dumps(change_data, indent=2))
+        metadata_file.write_text(json.dumps(metadata, indent=2))
         
-        # Also create a patch file for easy application
-        patch_file = change_dir / f"{change.id}.patch"
-        patch_content = self._create_patch(change)
-        patch_file.write_text(patch_content)
-        
-        # Stage both files
+        # Stage the mirrored file and metadata
         self.repo.index.add([
-            str(change_file.relative_to(self.claude_git_dir)),
-            str(patch_file.relative_to(self.claude_git_dir))
+            str(mirrored_file.relative_to(self.claude_git_dir)),
+            str(metadata_file.relative_to(self.claude_git_dir))
         ])
         
         # Create commit message with parent repo hash
@@ -497,8 +496,9 @@ class ClaudeGitRepository:
             
         return conflicts
     
-    def get_meaningful_diff(self, limit: int = 10) -> Dict:
-        """Get a human-readable diff showing Claude's recent changes vs current file state."""
+    def get_meaningful_diff(self, limit: int = 10, parent_hash: Optional[str] = None, 
+                           paths: Optional[List[str]] = None) -> Dict:
+        """Get git-native diff showing Claude's changes vs current files."""
         diff_results = {
             "changes_analyzed": [],
             "files_modified_since_claude": [],
@@ -531,19 +531,43 @@ class ClaudeGitRepository:
         
         for commit in change_commits:
             try:
-                # Find the change JSON file for this commit
-                json_files = [f for f in commit.tree.traverse() 
-                            if f.name.endswith('.json') and 'changes/' in str(f.path)]
+                # Find metadata files that were added/modified in this specific commit
+                if commit.parents:
+                    # Get files changed in this commit (compared to parent)
+                    changed_items = commit.diff(commit.parents[0])
+                    changed_metadata_files = [
+                        item.b_path for item in changed_items 
+                        if item.b_path and item.b_path.startswith('metadata/') and item.b_path.endswith('.json')
+                    ]
+                else:
+                    # First commit - all files are new
+                    changed_metadata_files = [
+                        str(f.path) for f in commit.tree.traverse() 
+                        if f.name.endswith('.json') and 'metadata/' in str(f.path)
+                    ]
                 
-                if not json_files:
+                if not changed_metadata_files:
                     continue
-                    
-                # Parse the change data
-                change_data = json.loads(json_files[0].data_stream.read().decode('utf-8'))
-                file_path = Path(change_data["file_path"])
                 
-                # Analyze this change
-                change_analysis = self._analyze_change_vs_current_state(change_data, commit)
+                # Get the first (and usually only) metadata file that was changed in this commit
+                metadata_path = changed_metadata_files[0]
+                metadata_blob = commit.tree / metadata_path
+                metadata = json.loads(metadata_blob.data_stream.read().decode('utf-8'))
+                
+                # Filter by parent hash if specified
+                if parent_hash:
+                    file_parent_hash = metadata.get("parent_repo_hash", "")
+                    if not (file_parent_hash and file_parent_hash.startswith(parent_hash)):
+                        continue
+                
+                # Filter by paths if specified
+                if paths:
+                    file_path = metadata.get("file_path", "")
+                    if not any(file_path.startswith(path) or path in file_path for path in paths):
+                        continue
+                
+                # Use git-native analysis
+                change_analysis = self._git_native_analysis(metadata, commit)
                 if change_analysis:
                     diff_results["changes_analyzed"].append(change_analysis)
                     
@@ -567,6 +591,52 @@ class ClaudeGitRepository:
                 
         return diff_results
     
+    def get_meaningful_diff_for_commit(self, commit_hash: str, parent_hash: Optional[str] = None, 
+                                      paths: Optional[List[str]] = None) -> Optional[Dict]:
+        """Get git-native diff for a specific commit."""
+        try:
+            commit = self.repo.commit(commit_hash)
+            
+            # Find the metadata file for this commit
+            metadata_files = [f for f in commit.tree.traverse() 
+                            if f.name.endswith('.json') and 'metadata/' in str(f.path)]
+            
+            if not metadata_files:
+                return None
+                
+            # Parse the metadata
+            metadata = json.loads(metadata_files[0].data_stream.read().decode('utf-8'))
+            
+            # Filter by parent hash if specified
+            if parent_hash:
+                file_parent_hash = metadata.get("parent_repo_hash", "")
+                if not (file_parent_hash and file_parent_hash.startswith(parent_hash)):
+                    return None
+            
+            # Filter by paths if specified
+            if paths:
+                file_path = metadata.get("file_path", "")
+                if not any(file_path.startswith(path) or path in file_path for path in paths):
+                    return None
+            
+            # Use git-native analysis
+            change_analysis = self._git_native_analysis(metadata, commit)
+            if change_analysis:
+                return {
+                    "changes_analyzed": [change_analysis],
+                    "summary": {
+                        "total_claude_changes": 1,
+                        "user_modified_after_claude": 1 if change_analysis["status"] == "user_modified" else 0,
+                        "claude_changes_intact": 1 if change_analysis["status"] == "unchanged" else 0,
+                        "conflicts": 1 if change_analysis.get("has_conflicts", False) else 0
+                    }
+                }
+            
+            return None
+            
+        except Exception as e:
+            return None
+    
     def _analyze_change_vs_current_state(self, change_data: Dict, commit: git.Commit) -> Optional[Dict]:
         """Analyze a single change against the current state of the file."""
         try:
@@ -579,6 +649,7 @@ class ClaudeGitRepository:
                 "commit_time": commit.committed_datetime,
                 "file_path": str(relative_path),
                 "change_type": change_data.get("change_type", "unknown"),
+                "parent_repo_hash": change_data.get("parent_repo_hash"),
                 "status": "unknown",
                 "diff_lines": [],
                 "has_conflicts": False,
@@ -594,84 +665,69 @@ class ClaudeGitRepository:
             # Get current file content
             current_content = file_path.read_text(encoding='utf-8')
             
-            # Compare against Claude's expected result
+            # For git-style diff, show what Claude changed (like git diff)
             if change_data["change_type"] == "write":
-                # For writes, compare against the new_content Claude created
+                # For writes, show the diff from empty file to Claude's content
                 claude_content = change_data.get("new_content", "")
                 
+                # Generate diff from empty to Claude's content
+                diff_lines = list(difflib.unified_diff(
+                    [],  # Empty file (before Claude's change)
+                    claude_content.splitlines(keepends=True),
+                    fromfile=f"a/{relative_path}",
+                    tofile=f"b/{relative_path}",
+                    lineterm=""
+                ))
+                analysis["diff_lines"] = diff_lines
+                
+                # Set status based on current state vs Claude's intended state
                 if current_content == claude_content:
                     analysis["status"] = "unchanged"
-                    analysis["diff_lines"] = [f"✅ File {relative_path} unchanged since Claude wrote it"]
                 else:
                     analysis["status"] = "user_modified"
                     analysis["has_conflicts"] = True
-                    # Generate diff
-                    diff_lines = list(difflib.unified_diff(
-                        claude_content.splitlines(keepends=True),
-                        current_content.splitlines(keepends=True),
-                        fromfile=f"Claude's version ({commit.hexsha[:8]})",
-                        tofile="Current version",
-                        lineterm=""
-                    ))
-                    analysis["diff_lines"] = diff_lines[:50]  # Limit output
                     
             elif change_data["change_type"] == "edit":
-                # For edits, this is more complex - we need to check if the edit was applied
-                # and if additional changes were made
-                
+                # For edits, show the diff of what Claude changed
                 old_string = change_data.get("old_string", "")
                 new_string = change_data.get("new_string", "")
+                old_content = change_data.get("old_content", "")
                 
                 if not old_string or not new_string:
                     analysis["status"] = "incomplete_data"
                     return analysis
                 
-                # Check if Claude's change is still present
-                if new_string in current_content:
-                    # Claude's change is present, but check if there are additional modifications
-                    # Compare against the old_content if available
-                    old_content = change_data.get("old_content", "")
+                # Generate git-style diff showing Claude's edit
+                if old_content and old_string in old_content:
+                    # Show diff of the old content vs new content
+                    claude_intended = old_content.replace(old_string, new_string)
                     
-                    if old_content:
-                        # Reconstruct what Claude intended the file to be
-                        if old_string in old_content:
-                            claude_intended = old_content.replace(old_string, new_string)
-                            
-                            if current_content == claude_intended:
-                                analysis["status"] = "unchanged"
-                                analysis["diff_lines"] = [f"✅ Claude's edit to {relative_path} is intact"]
-                            else:
-                                analysis["status"] = "user_modified"
-                                # Generate diff showing additional user changes
-                                diff_lines = list(difflib.unified_diff(
-                                    claude_intended.splitlines(keepends=True),
-                                    current_content.splitlines(keepends=True),
-                                    fromfile=f"After Claude's edit ({commit.hexsha[:8]})",
-                                    tofile="Current version", 
-                                    lineterm=""
-                                ))
-                                analysis["diff_lines"] = diff_lines[:50]
-                                
-                                # Check for conflicting changes to the same area
-                                if old_string in current_content:
-                                    analysis["has_conflicts"] = True
-                                    analysis["user_changes_detected"].append(
-                                        "⚠️  User may have reverted Claude's change"
-                                    )
-                        else:
-                            analysis["status"] = "incomplete_data" 
-                    else:
-                        # No old_content available, just check if new_string is present
+                    diff_lines = list(difflib.unified_diff(
+                        old_content.splitlines(keepends=True),
+                        claude_intended.splitlines(keepends=True),
+                        fromfile=f"a/{relative_path}",
+                        tofile=f"b/{relative_path}",
+                        lineterm=""
+                    ))
+                    analysis["diff_lines"] = diff_lines
+                    
+                    # Set status based on current state
+                    if current_content == claude_intended:
                         analysis["status"] = "unchanged"
-                        analysis["diff_lines"] = [f"✅ Claude's change found in {relative_path}"]
-                        
+                    else:
+                        analysis["status"] = "user_modified"
+                        analysis["has_conflicts"] = True
                 else:
-                    # Claude's change is not present - either reverted or file changed significantly
-                    analysis["status"] = "user_modified"
-                    analysis["has_conflicts"] = True
-                    analysis["user_changes_detected"].append(
-                        f"❌ Claude's change '{new_string[:50]}...' not found in current file"
-                    )
+                    # Fallback: create a simple diff showing the edit
+                    diff_lines = [
+                        f"--- a/{relative_path}",
+                        f"+++ b/{relative_path}",
+                        "@@ -1,1 +1,1 @@",
+                        f"-{old_string}",
+                        f"+{new_string}"
+                    ]
+                    analysis["diff_lines"] = diff_lines
+                    analysis["status"] = "incomplete_data"
                     
                     # Check if the old string is back
                     if old_string in current_content:
@@ -795,9 +851,15 @@ class ClaudeGitRepository:
                             )
                         
             elif change_type == "edit":
-                # For edits, check if we can reverse the string replacement
+                # For edits, check if we can reverse the string replacement with line-level analysis
                 old_string = change_data.get("old_string", "")
                 new_string = change_data.get("new_string", "")
+                
+                # Perform detailed line-level conflict detection
+                line_conflict_info = self._analyze_line_level_conflicts(
+                    file_path, old_string, new_string, change_data.get("parent_repo_hash")
+                )
+                revert_info.update(line_conflict_info)
                 
                 if old_string and new_string:
                     if new_string in current_content:
@@ -829,10 +891,7 @@ class ClaudeGitRepository:
                                     "⚠️  User committed changes to this file - high risk of conflicts"
                                 )
                         elif file_in_user_changes:
-                            revert_info["confidence"] = "low" 
-                            revert_info["warnings"].append(
-                                "⚠️  File has uncommitted changes - reverting may conflict"
-                            )
+                            revert_info["confidence"] = "low"
                             
                     elif old_string in current_content:
                         # Claude's change was already reverted or original content restored
@@ -851,3 +910,509 @@ class ClaudeGitRepository:
         except Exception as e:
             revert_info["warnings"].append(f"❌ Error analyzing revert capability: {e}")
             return revert_info
+    
+    def _analyze_line_level_conflicts(self, file_path: Path, old_string: str, new_string: str, parent_hash: Optional[str]) -> Dict:
+        """Perform detailed line-level analysis to determine if revert is safe."""
+        conflict_info = {
+            "line_analysis": "unknown",
+            "specific_conflicts": [],
+            "safe_revert_confidence": "low"
+        }
+        
+        try:
+            if not file_path.exists():
+                conflict_info["line_analysis"] = "file_missing"
+                return conflict_info
+                
+            current_content = file_path.read_text(encoding='utf-8')
+            
+            # Check if Claude's change is still intact
+            if new_string not in current_content:
+                if old_string in current_content:
+                    conflict_info["line_analysis"] = "already_reverted"
+                    conflict_info["safe_revert_confidence"] = "high"
+                    conflict_info["warnings"] = ["ℹ️  Change appears already reverted"]
+                else:
+                    conflict_info["line_analysis"] = "content_changed_significantly"
+                    conflict_info["warnings"] = ["❌ File changed significantly - cannot locate Claude's change"]
+                return conflict_info
+            
+            # Claude's change is present - analyze if surrounding context changed
+            current_lines = current_content.splitlines()
+            old_lines = old_string.splitlines()
+            new_lines = new_string.splitlines()
+            
+            # Find where Claude's change appears in current file
+            claude_change_context = self._find_change_context(current_lines, new_lines)
+            
+            if not claude_change_context:
+                conflict_info["line_analysis"] = "context_not_found"
+                conflict_info["warnings"] = ["❌ Cannot locate Claude's change context in current file"]
+                return conflict_info
+            
+            start_line, end_line = claude_change_context
+            
+            # Get what the file looked like when Claude made the change
+            if parent_hash:
+                parent_content = self._get_file_at_parent_hash(file_path, parent_hash)
+                if parent_content:
+                    # Compare current surrounding context with parent context
+                    conflict_analysis = self._compare_context_changes(
+                        parent_content, current_content, start_line, end_line, old_string, new_string
+                    )
+                    conflict_info.update(conflict_analysis)
+                else:
+                    # Fallback: basic string replacement check
+                    conflict_info.update(self._basic_replacement_check(current_content, old_string, new_string))
+            else:
+                # No parent hash available, use basic check
+                conflict_info.update(self._basic_replacement_check(current_content, old_string, new_string))
+                
+        except Exception as e:
+            conflict_info["line_analysis"] = "error"
+            conflict_info["warnings"] = [f"❌ Error in line analysis: {e}"]
+            
+        return conflict_info
+    
+    def _find_change_context(self, current_lines: List[str], new_lines: List[str]) -> Optional[Tuple[int, int]]:
+        """Find the line range where Claude's change appears in the current file."""
+        try:
+            if not new_lines:
+                return None
+                
+            # Look for the first line of Claude's change
+            first_new_line = new_lines[0]
+            for i, line in enumerate(current_lines):
+                if first_new_line.strip() in line:
+                    # Found potential start, verify the full change is here
+                    if len(new_lines) == 1:
+                        return (i, i + 1)
+                    
+                    # Check if multiple lines match
+                    match_count = 0
+                    for j, new_line in enumerate(new_lines):
+                        if i + j < len(current_lines) and new_line.strip() in current_lines[i + j]:
+                            match_count += 1
+                        else:
+                            break
+                    
+                    if match_count == len(new_lines):
+                        return (i, i + len(new_lines))
+                        
+        except Exception:
+            pass
+        return None
+    
+    def _get_file_at_parent_hash(self, file_path: Path, parent_hash: str) -> Optional[str]:
+        """Get the content of a file at a specific parent repo commit."""
+        try:
+            # Try to get the file content from the parent repo at the given hash
+            parent_git_dir = self.project_root / ".git"
+            if not parent_git_dir.exists():
+                return None
+                
+            from git import Repo as GitRepo
+            parent_repo = GitRepo(self.project_root)
+            
+            # Get relative path from project root
+            relative_path = file_path.relative_to(self.project_root)
+            
+            # Get the file at the parent hash
+            commit = parent_repo.commit(parent_hash)
+            blob = commit.tree / str(relative_path)
+            return blob.data_stream.read().decode('utf-8')
+            
+        except Exception:
+            return None
+    
+    def _compare_context_changes(self, parent_content: str, current_content: str, 
+                                start_line: int, end_line: int, old_string: str, new_string: str) -> Dict:
+        """Compare context around Claude's change using content-based diff (like git)."""
+        result = {
+            "line_analysis": "git_style_diff",
+            "safe_revert_confidence": "high",
+            "specific_conflicts": [],
+            "warnings": []
+        }
+        
+        try:
+            # Use git-style three-way diff analysis
+            # Compare: parent → claude_intended → current
+            
+            # Step 1: What Claude intended the file to look like
+            claude_intended_content = parent_content.replace(old_string, new_string)
+            
+            # Step 2: Generate unified diff between Claude's intended result and current state  
+            claude_lines = claude_intended_content.splitlines(keepends=True)
+            current_lines = current_content.splitlines(keepends=True)
+            
+            diff_lines = list(difflib.unified_diff(
+                claude_lines,
+                current_lines,
+                fromfile="Claude's intended result",
+                tofile="Current file",
+                lineterm="",
+                n=3  # 3 lines of context like git default
+            ))
+            
+            if len(diff_lines) <= 2:  # Only headers, no actual differences
+                result["safe_revert_confidence"] = "high"
+                result["warnings"] = [
+                    "✅ File matches Claude's intended result - safe to revert"
+                ]
+            else:
+                # Analyze the differences to see if they conflict with Claude's change
+                conflict_analysis = self._analyze_unified_diff(diff_lines, old_string, new_string)
+                result.update(conflict_analysis)
+                
+        except Exception as e:
+            result["line_analysis"] = "git_diff_failed"
+            result["safe_revert_confidence"] = "low"
+            result["warnings"] = [f"⚠️  Git-style diff analysis failed: {e}"]
+            
+        return result
+    
+    def _analyze_unified_diff(self, diff_lines: List[str], old_string: str, new_string: str) -> Dict:
+        """Analyze unified diff output to detect conflicts with Claude's change."""
+        result = {
+            "safe_revert_confidence": "medium",
+            "specific_conflicts": [],
+            "warnings": []
+        }
+        
+        try:
+            # Count additions and deletions
+            additions = [line for line in diff_lines if line.startswith('+') and not line.startswith('+++')]
+            deletions = [line for line in diff_lines if line.startswith('-') and not line.startswith('---')]
+            
+            # Check if changes intersect with Claude's specific strings
+            claude_strings_modified = False
+            user_added_content = []
+            
+            for addition in additions:
+                content = addition[1:]  # Remove + prefix
+                if old_string.strip() in content or new_string.strip() in content:
+                    claude_strings_modified = True
+                else:
+                    user_added_content.append(content.strip())
+            
+            for deletion in deletions:
+                content = deletion[1:]  # Remove - prefix  
+                if old_string.strip() in content or new_string.strip() in content:
+                    claude_strings_modified = True
+            
+            # Determine safety based on what was changed
+            if not claude_strings_modified:
+                if len(user_added_content) <= 2:
+                    result["safe_revert_confidence"] = "high"
+                    result["warnings"] = [
+                        f"✅ User added {len(additions)} lines, but didn't modify Claude's specific changes - safe to revert"
+                    ]
+                else:
+                    result["safe_revert_confidence"] = "medium"
+                    result["warnings"] = [
+                        f"⚠️  User added {len(additions)} lines near Claude's change - review before reverting"
+                    ]
+            else:
+                result["safe_revert_confidence"] = "low"
+                result["specific_conflicts"] = [
+                    f"User modified {len([d for d in deletions if old_string.strip() in d or new_string.strip() in d])} lines that contain Claude's changes",
+                    f"User added {len([a for a in additions if old_string.strip() in a or new_string.strip() in a])} lines that reference Claude's changes"
+                ]
+                result["warnings"] = [
+                    "❌ User modifications overlap with Claude's specific changes - high risk of conflicts"
+                ]
+                
+        except Exception as e:
+            result["safe_revert_confidence"] = "low"
+            result["warnings"] = [f"⚠️  Diff analysis failed: {e}"]
+            
+        return result
+    
+    def _basic_replacement_check(self, current_content: str, old_string: str, new_string: str) -> Dict:
+        """Basic check if string replacement can be safely reversed."""
+        result = {
+            "line_analysis": "basic_check", 
+            "safe_revert_confidence": "medium",
+            "warnings": []
+        }
+        
+        if new_string in current_content and old_string not in current_content:
+            # Simple case - Claude's change is there, original is not
+            result["safe_revert_confidence"] = "high"
+            result["warnings"] = ["✅ Simple string replacement - should be safe to revert"]
+        elif new_string in current_content and old_string in current_content:
+            # Both strings present - potential for confusion
+            result["safe_revert_confidence"] = "low"
+            result["warnings"] = ["⚠️  Both old and new strings found - revert may be ambiguous"]
+        else:
+            result["safe_revert_confidence"] = "low"
+            result["warnings"] = ["⚠️  Cannot perform basic replacement analysis"]
+            
+        return result
+
+    def _git_native_analysis(self, metadata: Dict, commit: git.Commit) -> Optional[Dict]:
+        """Use git-native approach to analyze changes by comparing mirrored files."""
+        try:
+            # metadata["file_path"] is already a relative path
+            relative_path = Path(metadata["file_path"])
+            file_path = self.project_root / relative_path
+            
+            analysis = {
+                "commit_hash": commit.hexsha[:8],
+                "commit_message": commit.message.strip().split('\n')[0] if commit.message else "No message",
+                "commit_time": commit.committed_datetime,
+                "file_path": str(relative_path),
+                "change_type": metadata.get("change_type", "unknown"),
+                "parent_repo_hash": metadata.get("parent_repo_hash"),
+                "status": "unknown",
+                "diff_lines": [],
+                "has_conflicts": False,
+                "user_changes_detected": []
+            }
+
+            # Check if actual file exists
+            if not file_path.exists():
+                analysis["status"] = "file_not_found"
+                analysis["diff_lines"] = [f"❌ File {relative_path} no longer exists"]
+                return analysis
+
+            # Path to the mirrored file in claude-git repo
+            mirrored_file = self.claude_git_dir / "files" / relative_path
+            
+            if not mirrored_file.exists():
+                analysis["status"] = "mirror_not_found"
+                analysis["diff_lines"] = [f"⚠️  Mirrored file not found for {relative_path}"]
+                return analysis
+
+            # Use git diff to show what Claude changed (like git diff)
+            try:
+                # Read both file contents
+                mirrored_content = mirrored_file.read_text(encoding='utf-8')
+                current_content = file_path.read_text(encoding='utf-8')
+                
+                # Generate git-style diff showing what Claude changed
+                # We need to reconstruct what the file looked like before Claude's change
+                change_type = metadata.get("change_type", "unknown")
+                
+                if change_type == "write":
+                    # For writes, show diff from empty file to Claude's content
+                    diff_lines = list(difflib.unified_diff(
+                        [],  # Empty file before Claude
+                        mirrored_content.splitlines(keepends=True),
+                        fromfile=f"a/{relative_path}",
+                        tofile=f"b/{relative_path}",
+                        lineterm=""
+                    ))
+                elif change_type == "edit":
+                    # For edits, we need the old content from tool_input
+                    tool_input = metadata.get("tool_input", {})
+                    old_string = tool_input.get("parameters", {}).get("old_string", "")
+                    new_string = tool_input.get("parameters", {}).get("new_string", "")
+                    
+                    if old_string and new_string and old_string in mirrored_content:
+                        # Reconstruct the file before Claude's edit
+                        before_content = mirrored_content.replace(new_string, old_string)
+                        diff_lines = list(difflib.unified_diff(
+                            before_content.splitlines(keepends=True),
+                            mirrored_content.splitlines(keepends=True),
+                            fromfile=f"a/{relative_path}",
+                            tofile=f"b/{relative_path}",
+                            lineterm=""
+                        ))
+                    else:
+                        # Fallback: simple representation
+                        diff_lines = [
+                            f"--- a/{relative_path}",
+                            f"+++ b/{relative_path}",
+                            "@@ -1,1 +1,1 @@",
+                            f"-{old_string}",
+                            f"+{new_string}"
+                        ]
+                else:
+                    # Unknown change type, just show as new file
+                    diff_lines = list(difflib.unified_diff(
+                        [],
+                        mirrored_content.splitlines(keepends=True),
+                        fromfile=f"a/{relative_path}",
+                        tofile=f"b/{relative_path}",
+                        lineterm=""
+                    ))
+                
+                analysis["diff_lines"] = diff_lines
+                
+                # Set status based on whether current file matches Claude's version
+                if mirrored_content == current_content:
+                    analysis["status"] = "unchanged" 
+                    analysis["revert_info"] = {
+                        "can_revert": True,
+                        "revert_type": "clean_revert",
+                        "confidence": "high",
+                        "warnings": []
+                    }
+                else:
+                    analysis["status"] = "user_modified"
+                    analysis["has_conflicts"] = True
+                    
+                    # Generate unified diff using git-style approach
+                    diff_lines = list(difflib.unified_diff(
+                        mirrored_content.splitlines(keepends=True),
+                        current_content.splitlines(keepends=True),
+                        fromfile=f"Claude's version ({commit.hexsha[:8]})",
+                        tofile="Current version",
+                        lineterm="",
+                        n=3  # 3 lines context like git
+                    ))
+                    
+                    # Limit diff output for readability
+                    analysis["diff_lines"] = diff_lines[:50] if len(diff_lines) > 50 else diff_lines
+                    
+                    # Analyze revert capability using git-style approach
+                    analysis["revert_info"] = self._git_native_revert_analysis(
+                        mirrored_content, current_content, metadata, analysis
+                    )
+                    
+                    # Detect type of user modifications
+                    analysis["user_changes_detected"] = self._detect_change_patterns(diff_lines)
+
+            except Exception as e:
+                analysis["status"] = "diff_error"
+                analysis["diff_lines"] = [f"❌ Error generating diff: {str(e)}"]
+                
+            # Add revert capability analysis
+            if "revert_info" not in analysis:
+                analysis["revert_info"] = self._analyze_revert_capability(metadata, analysis["status"])
+                
+            return analysis
+            
+        except Exception as e:
+            return {
+                "commit_hash": commit.hexsha[:8] if commit else "unknown",
+                "commit_message": commit.message.strip().split('\n')[0] if commit and commit.message else "No message",
+                "file_path": metadata.get("file_path", "unknown"),
+                "status": "analysis_error",
+                "error": str(e),
+                "diff_lines": [f"❌ Analysis failed: {str(e)}"]
+            }
+
+    def _git_native_revert_analysis(self, claude_content: str, current_content: str, 
+                                   metadata: Dict, analysis: Dict) -> Dict:
+        """Analyze revert capability using git-native diff approach."""
+        revert_info = {
+            "can_revert": False,
+            "revert_type": "unknown",
+            "confidence": "low",
+            "warnings": [],
+            "diff_stats": {}
+        }
+        
+        try:
+            # Get unified diff stats
+            diff_lines = list(difflib.unified_diff(
+                claude_content.splitlines(keepends=True),
+                current_content.splitlines(keepends=True),
+                fromfile="Claude's version",
+                tofile="Current version",
+                lineterm="",
+                n=3
+            ))
+            
+            # Count changes
+            additions = [line for line in diff_lines if line.startswith('+') and not line.startswith('+++')]
+            deletions = [line for line in diff_lines if line.startswith('-') and not line.startswith('---')]
+            
+            revert_info["diff_stats"] = {
+                "additions": len(additions),
+                "deletions": len(deletions),
+                "total_changes": len(additions) + len(deletions)
+            }
+            
+            # Determine revert capability based on change complexity
+            total_changes = revert_info["diff_stats"]["total_changes"]
+            
+            if total_changes == 0:
+                # No changes - already reverted or identical
+                revert_info["can_revert"] = True
+                revert_info["revert_type"] = "no_changes_needed"
+                revert_info["confidence"] = "high"
+                revert_info["warnings"] = ["ℹ️  Files are identical - no revert needed"]
+                
+            elif total_changes <= 10:
+                # Small changes - likely safe to revert
+                revert_info["can_revert"] = True
+                revert_info["revert_type"] = "safe_revert"
+                revert_info["confidence"] = "high" if total_changes <= 3 else "medium"
+                revert_info["warnings"] = [
+                    f"✅ {total_changes} line(s) changed - revert should be safe"
+                ]
+                
+            elif total_changes <= 50:
+                # Medium changes - review recommended
+                revert_info["can_revert"] = True  
+                revert_info["revert_type"] = "review_recommended"
+                revert_info["confidence"] = "medium"
+                revert_info["warnings"] = [
+                    f"⚠️  {total_changes} lines changed - review diff carefully before reverting"
+                ]
+                
+            else:
+                # Large changes - high risk
+                revert_info["can_revert"] = False
+                revert_info["revert_type"] = "high_risk"
+                revert_info["confidence"] = "low"
+                revert_info["warnings"] = [
+                    f"❌ {total_changes} lines changed - reverting may lose significant user work"
+                ]
+            
+            # Check parent repo status for additional context
+            current_parent_status = self._get_parent_repo_status()
+            current_parent_hash = self._get_parent_repo_hash()
+            claude_parent_hash = metadata.get("parent_repo_hash")
+            
+            if claude_parent_hash and current_parent_hash != claude_parent_hash:
+                revert_info["warnings"].append(
+                    f"📝 Parent repo changed since Claude's modification ({claude_parent_hash[:8]} → {current_parent_hash[:8] if current_parent_hash else 'unknown'})"
+                )
+                
+            relative_path = str(Path(metadata["file_path"]).relative_to(self.project_root))
+            if (current_parent_status and 
+                relative_path in current_parent_status.get("modified_files", [])):
+                revert_info["warnings"].append(
+                    "⚠️  File has uncommitted changes in parent repo"
+                )
+                if revert_info["confidence"] == "high":
+                    revert_info["confidence"] = "medium"
+            
+        except Exception as e:
+            revert_info["warnings"] = [f"❌ Error analyzing revert capability: {str(e)}"]
+            
+        return revert_info
+
+    def _detect_change_patterns(self, diff_lines: List[str]) -> List[str]:
+        """Detect patterns in user changes for better analysis."""
+        patterns = []
+        
+        try:
+            additions = [line for line in diff_lines if line.startswith('+') and not line.startswith('+++')]
+            deletions = [line for line in diff_lines if line.startswith('-') and not line.startswith('---')]
+            
+            if len(additions) > 0 and len(deletions) == 0:
+                patterns.append(f"📝 User added {len(additions)} lines")
+            elif len(deletions) > 0 and len(additions) == 0:
+                patterns.append(f"🗑️  User removed {len(deletions)} lines")
+            elif len(additions) > 0 and len(deletions) > 0:
+                patterns.append(f"🔄 User modified {len(additions)} additions, {len(deletions)} deletions")
+                
+            # Check for common patterns
+            import_changes = [line for line in additions if 'import ' in line.lower()]
+            comment_changes = [line for line in additions if line.strip().startswith('#') or line.strip().startswith('//')]
+            
+            if import_changes:
+                patterns.append(f"📦 {len(import_changes)} import statements added")
+            if comment_changes:
+                patterns.append(f"💬 {len(comment_changes)} comments added")
+                
+        except Exception:
+            patterns.append("❓ Could not analyze change patterns")
+            
+        return patterns
