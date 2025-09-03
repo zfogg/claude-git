@@ -1445,42 +1445,48 @@ def _revert_single_commit(claude_repo, commit_ref: str, dry_run: bool, interacti
                 console.print("[yellow]Revert cancelled[/yellow]")
                 return
     
-    # Get the changes for this commit
+    # Try the traditional approach first (metadata-based)
     diff_results = claude_repo.get_meaningful_diff_for_commit(commit_hash)
+    traditional_changes = []
     
-    if not diff_results or not diff_results.get("changes_analyzed"):
-        console.print(f"[yellow]No Claude changes found in commit {commit_hash[:8]}[/yellow]")
-        return
+    if diff_results and diff_results.get("changes_analyzed"):
+        for change in diff_results["changes_analyzed"]:
+            if interactive:
+                # Show the change and ask user
+                console.print(f"\n[bold]Change in {change['file_path']}:[/bold]")
+                _display_git_style_diff(change)
+                
+                if click.confirm(f"Revert this change?", default=True):
+                    traditional_changes.append(change)
+            else:
+                traditional_changes.append(change)
     
-    changes_to_revert = []
+    # Try git-native approach (restore to parent commit state)
+    git_native_reverted = 0
+    if not traditional_changes:
+        console.print(f"[dim]Using git-native revert approach for commit {commit_hash[:8]}[/dim]")
+        git_native_reverted = _revert_using_git_native_approach(claude_repo, commit_hash, dry_run, interactive)
     
-    for change in diff_results["changes_analyzed"]:
-        if interactive:
-            # Show the change and ask user
-            console.print(f"\n[bold]Change in {change['file_path']}:[/bold]")
-            _display_git_style_diff(change)
-            
-            if click.confirm(f"Revert this change?", default=True):
-                changes_to_revert.append(change)
-        else:
-            changes_to_revert.append(change)
-    
-    if not changes_to_revert:
-        console.print("[yellow]No changes selected for reverting[/yellow]")
-        return
-        
-    # Apply the reverts
-    reverted_count = 0
-    for change in changes_to_revert:
+    # Apply traditional reverts
+    traditional_reverted = 0
+    for change in traditional_changes:
         if _revert_single_change(change, dry_run):
-            reverted_count += 1
+            traditional_reverted += 1
+    
+    total_reverted = traditional_reverted + git_native_reverted
     
     if dry_run:
-        console.print(f"[green]Would revert {reverted_count} change(s)[/green]")
+        if total_reverted > 0:
+            console.print(f"[green]Would revert {total_reverted} change(s)[/green]")
+        else:
+            console.print(f"[yellow]No changes to revert in commit {commit_hash[:8]}[/yellow]")
     else:
-        console.print(f"[green]Successfully reverted {reverted_count} change(s)[/green]")
-        # Track this revert for restore navigation
-        _track_revert(claude_repo, commit_hash)
+        if total_reverted > 0:
+            console.print(f"[green]Successfully reverted {total_reverted} change(s)[/green]")
+            # Track this revert for restore navigation
+            _track_revert(claude_repo, commit_hash)
+        else:
+            console.print(f"[yellow]No changes were reverted from commit {commit_hash[:8]}[/yellow]")
 
 
 def _revert_commit_range(claude_repo, commit_range: str, dry_run: bool, interactive: bool):
@@ -1560,13 +1566,9 @@ def _revert_single_change(change, dry_run: bool) -> bool:
         change_type = change.get("change_type", "unknown")
         
         if change_type == "write":
-            # For writes, delete the file
-            if dry_run:
-                console.print(f"[yellow]Would delete {file_path}[/yellow]")
-            else:
-                current_file.unlink()
-                console.print(f"[green]Deleted {file_path}[/green]")
-            return True
+            # For writes, we cannot safely revert file creation without risking user data
+            console.print(f"[yellow]Cannot safely revert file creation for {file_path} - user may have modified it[/yellow]")
+            return False
             
         elif change_type == "edit":
             # For edits, try to reverse the change
@@ -1868,6 +1870,7 @@ def _restore_single_commit(claude_repo, commit_ref: str, dry_run: bool, interact
     
     changes_to_restore = []
     
+    # Find files to restore/modify
     for file_path, file_content in files_to_restore.items():
         current_file = claude_repo.project_root / file_path
         
@@ -1901,6 +1904,9 @@ def _restore_single_commit(claude_repo, commit_ref: str, dry_run: bool, interact
                     changes_to_restore.append(change_info)
             else:
                 changes_to_restore.append(change_info)
+    
+    # Note: We don't automatically delete files that don't exist at target commit
+    # because user may have their own files. Restore only modifies tracked Claude files.
     
     if not changes_to_restore:
         console.print("[green]Already at target commit state - nothing to restore[/green]")
@@ -2096,6 +2102,102 @@ def _apply_restore_change(change_info: Dict, dry_run: bool) -> bool:
     except Exception as e:
         console.print(f"[red]Error restoring {change_info.get('file_path', 'unknown')}: {e}[/red]")
         return False
+
+
+def _revert_using_git_native_approach(claude_repo, commit_hash: str, dry_run: bool, interactive: bool) -> int:
+    """Revert by restoring to the parent commit state (git-native approach)."""
+    try:
+        # Get the parent commit of the commit we're reverting
+        parent_commits = claude_repo.run_git_command([
+            "rev-list", "--parents", "-n", "1", commit_hash
+        ]).strip().split()
+        
+        if len(parent_commits) < 2:
+            console.print(f"[yellow]Cannot find parent commit for {commit_hash[:8]} - may be initial commit[/yellow]")
+            return 0
+            
+        parent_hash = parent_commits[1]  # First parent
+        console.print(f"[dim]Reverting to parent state: {parent_hash[:8]}[/dim]")
+        
+        # Get files that differ between parent and the commit we're reverting
+        current_files = _get_files_at_commit(claude_repo, commit_hash)
+        parent_files = _get_files_at_commit(claude_repo, parent_hash)
+        
+        changes_to_apply = []
+        
+        # Find files that were added or modified in the commit we're reverting
+        for file_path, commit_content in current_files.items():
+            current_file = claude_repo.project_root / file_path
+            
+            if file_path in parent_files:
+                # File was modified - restore to parent version
+                parent_content = parent_files[file_path]
+                if commit_content != parent_content:
+                    current_content = ""
+                    if current_file.exists():
+                        try:
+                            current_content = current_file.read_text(encoding='utf-8')
+                        except Exception:
+                            pass
+                    
+                    if current_content != parent_content:
+                        change_info = {
+                            "file_path": file_path,
+                            "action": "restore_to_parent",
+                            "target_content": parent_content
+                        }
+                        
+                        if interactive:
+                            console.print(f"\n[bold]Revert {file_path} to parent state?[/bold]")
+                            console.print(f"  [dim]Current: {len(current_content)} chars[/dim]")
+                            console.print(f"  [dim]Parent:  {len(parent_content)} chars[/dim]")
+                            if click.confirm("Revert this file?", default=True):
+                                changes_to_apply.append(change_info)
+                        else:
+                            changes_to_apply.append(change_info)
+            else:
+                # File was added in the commit we're reverting - cannot safely delete user files
+                if current_file.exists():
+                    console.print(f"[yellow]Cannot safely delete {file_path} (user may have modified it)[/yellow]")
+        
+        # Apply the changes
+        reverted_count = 0
+        
+        # Restore modified files
+        for change in changes_to_apply:
+            if _apply_git_native_revert_change(change, dry_run):
+                reverted_count += 1
+        
+        # Note: We don't delete files that were added in reverted commits
+        # because user may have modified them. Only modify existing tracked files.
+        
+        return reverted_count
+        
+    except Exception as e:
+        console.print(f"[red]Error in git-native revert: {e}[/red]")
+        return 0
+
+
+def _apply_git_native_revert_change(change_info: Dict, dry_run: bool) -> bool:
+    """Apply a git-native revert change."""
+    try:
+        file_path = change_info["file_path"]
+        target_content = change_info["target_content"]
+        current_file = Path.cwd() / file_path
+        
+        if dry_run:
+            console.print(f"[yellow]Would revert {file_path} to parent state[/yellow]")
+            return True
+        
+        # Write the parent content
+        current_file.write_text(target_content, encoding='utf-8')
+        console.print(f"[blue]Reverted {file_path} to parent state[/blue]")
+        return True
+        
+    except Exception as e:
+        console.print(f"[red]Error reverting {change_info.get('file_path', 'unknown')}: {e}[/red]")
+        return False
+
 
 
 def _track_revert(claude_repo, commit_hash: str):
