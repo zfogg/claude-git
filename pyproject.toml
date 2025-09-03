@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-git"
-version = "0.1.0"
+version = "0.2.0"
 description = "Parallel version control for AI changes"
 readme = "README.md"
 authors = [{name = "Claude Git Contributors"}]
@@ -29,12 +29,14 @@ dependencies = [
     "watchdog>=3.0.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
+    "pytest>=8.3.5",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-xdist>=3.0.0",
     "black>=23.0.0",
     "isort>=5.12.0",
     "flake8>=6.0.0",

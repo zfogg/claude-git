@@ -152,7 +152,8 @@ def test_no_parent_repo_fallback(project_with_git):
     assert commit is not None
     
     # JSON should have null parent_repo_hash
-    json_files = [f for f in commit.tree.traverse() if f.name.endswith('.json')]
+    json_files = [f for f in commit.tree.traverse() 
+                 if f.name.endswith('.json') and 'changes/' in str(f.path)]
     change_data = json.loads(json_files[0].data_stream.read().decode('utf-8'))
     assert change_data['parent_repo_hash'] is None
 

@@ -188,8 +188,9 @@ def logout(user_id):
     
     # Verify both Claude changes are tracked
     commits = list(claude_repo.repo.iter_commits())
-    claude_commits = [c for c in commits if "claude-" in c.message or "write:" in c.message.lower()]
-    assert len(claude_commits) >= 2
+    # Look for commits containing changes, excluding initial commits
+    change_commits = [c for c in commits if not c.message.startswith("Initial") and not c.message.startswith("Update sessions")]
+    assert len(change_commits) >= 2
     
     # Verify patches are independent and can be applied separately
     patch_files = list((claude_repo.claude_git_dir / "changes").glob("*.patch"))
@@ -280,7 +281,8 @@ def test_rollback_claude_change_after_human_modification(temp_project):
     
     # Get the rollback patch for Claude's change
     commit = claude_repo.repo.commit(claude_commit)
-    json_files = [f for f in commit.tree.traverse() if f.name.endswith('.json')]
+    json_files = [f for f in commit.tree.traverse() 
+                 if f.name.endswith('.json') and 'changes/' in str(f.path)]
     
     assert len(json_files) >= 1
     

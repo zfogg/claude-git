@@ -3,7 +3,7 @@
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from pydantic import BaseModel
 
@@ -30,6 +30,7 @@ class Change(BaseModel):
     new_string: Optional[str] = None  # For edit operations
     tool_input: dict  # Raw tool input from hook
     parent_repo_hash: Optional[str] = None  # Git hash of parent repo when change was made
+    parent_repo_status: Optional[Dict] = None  # Status of parent repo to detect human changes
     
     model_config = {
         "arbitrary_types_allowed": True

@@ -12,6 +12,42 @@ from claude_git.core.repository import ClaudeGitRepository
 from claude_git.models.change import Change, ChangeType
 
 
+def extract_latest_tool_from_transcript(transcript_path: str, debug_log: Path) -> Dict[str, Any]:
+    """Extract the latest tool call from the transcript file."""
+    try:
+        with open(transcript_path, 'r') as f:
+            lines = f.readlines()
+        
+        # Look for the last tool call in the transcript
+        for line in reversed(lines):
+            try:
+                entry = json.loads(line.strip())
+                # Look for assistant messages with content array containing tool_use
+                if entry.get("type") == "assistant" and "message" in entry:
+                    content = entry["message"].get("content", [])
+                    if isinstance(content, list):
+                        for item in reversed(content):  # Get the last tool in the message
+                            if item.get("type") == "tool_use":
+                                tool_name = item.get("name", "")
+                                if tool_name in ["Edit", "Write", "MultiEdit"]:
+                                    parameters = item.get("input", {})
+                                    return {
+                                        "name": tool_name,
+                                        "parameters": parameters
+                                    }
+            except (json.JSONDecodeError, KeyError):
+                continue
+                
+        with open(debug_log, "a") as f:
+            f.write("No matching tool calls found in transcript\n")
+        return {}
+        
+    except Exception as e:
+        with open(debug_log, "a") as f:
+            f.write(f"Error reading transcript: {e}\n")
+        return {}
+
+
 def parse_hook_input(hook_input: str) -> Dict[str, Any]:
     """Parse the hook input JSON."""
     try:
@@ -61,7 +97,17 @@ def extract_change_info(tool_data: Dict[str, Any]) -> Dict[str, Any]:
 def create_change_record(tool_data: Dict[str, Any], session_id: str) -> Change:
     """Create a Change record from tool data."""
     change_info = extract_change_info(tool_data)
-    file_path = Path(change_info["file_path"])
+    
+    # Check if file_path is None and handle gracefully
+    file_path_str = change_info["file_path"]
+    if not file_path_str:
+        # Log the error and exit gracefully
+        debug_log = Path.home() / ".claude" / "claude-git-debug.log"
+        with open(debug_log, "a") as f:
+            f.write(f"Error: file_path is None in tool data: {tool_data}\n")
+        return None
+    
+    file_path = Path(file_path_str)
     
     # Get content before change for Edit operations
     old_content = None
@@ -93,17 +139,60 @@ def create_change_record(tool_data: Dict[str, Any], session_id: str) -> Change:
 
 def main():
     """Main hook function."""
-    if len(sys.argv) != 2:
-        print("Usage: capture.py <hook_input_json>", file=sys.stderr)
-        sys.exit(1)
+    # Debug: log that the hook was called
+    debug_log = Path.home() / ".claude" / "claude-git-debug.log"
+    with open(debug_log, "a") as f:
+        f.write(f"Hook called at {datetime.now()}: argv={sys.argv}\n")
     
-    hook_input = sys.argv[1]
+    # Get hook input - Claude Code passes JSON through stdin
+    hook_input = ""
+    try:
+        # Read from stdin (this is how Claude Code passes the data)
+        hook_input = sys.stdin.read().strip()
+        if not hook_input and len(sys.argv) > 1:
+            # Fallback to command line args for testing
+            hook_input = sys.argv[1]
+    except Exception as e:
+        with open(debug_log, "a") as f:
+            f.write(f"Error reading input: {e}\n")
+    
+    if not hook_input:
+        with open(debug_log, "a") as f:
+            f.write("No hook input provided\n")
+        sys.exit(0)  # Exit gracefully instead of error
+    
+    with open(debug_log, "a") as f:
+        f.write(f"Hook input: {hook_input[:200]}...\n")
+    
     hook_data = parse_hook_input(hook_input)
     
-    # Check if this is a tool we care about
-    tool_name = hook_data.get("tool", {}).get("name", "")
+    # The JSON structure from Claude Code looks like:
+    # {"session_id": "...", "transcript_path": "...", "cwd": "...", "tool": {...}, ...}
+    # or it might have tool data in different structure
+    
+    # Check if this has tool information
+    tool_data = hook_data.get("tool", {})
+    if not tool_data:
+        # Try to extract tool from transcript file
+        transcript_path = hook_data.get("transcript_path")
+        if transcript_path and Path(transcript_path).exists():
+            with open(debug_log, "a") as f:
+                f.write(f"No direct tool data, reading transcript: {transcript_path}\n")
+            
+            tool_data = extract_latest_tool_from_transcript(transcript_path, debug_log)
+            if not tool_data:
+                with open(debug_log, "a") as f:
+                    f.write("No tool data found in transcript either\n")
+                sys.exit(0)
+        else:
+            with open(debug_log, "a") as f:
+                f.write("No tool data and no transcript path\n")
+            sys.exit(0)
+    
+    tool_name = tool_data.get("name", "")
     if tool_name not in ["Edit", "Write", "MultiEdit"]:
-        # Not a tool we track, exit silently
+        with open(debug_log, "a") as f:
+            f.write(f"Tool {tool_name} not tracked, exiting\n")
         sys.exit(0)
     
     # Find the project root (look for .git directory)
@@ -128,7 +217,12 @@ def main():
     session = claude_repo.get_or_create_current_session()
     
     # Create change record
-    change = create_change_record(hook_data.get("tool", {}), session.id)
+    change = create_change_record(tool_data, session.id)
+    
+    if change is None:
+        with open(debug_log, "a") as f:
+            f.write("Failed to create change record, skipping\n")
+        sys.exit(0)
     
     # Store the change
     claude_repo.add_change(change)
