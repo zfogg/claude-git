@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-git"
+version = "0.1.0"
+description = "Parallel version control for AI changes"
+readme = "README.md"
+authors = [{name = "Claude Git Contributors"}]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.8.1"
+dependencies = [
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    "gitpython>=3.1.0",
+    "pydantic>=2.0.0",
+    "watchdog>=3.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.5.0",
+    "pre-commit>=3.0.0",
+]
+
+[project.scripts]
+claude-git = "claude_git.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/zfogg/claude-git"
+Repository = "https://github.com/zfogg/claude-git"
+Issues = "https://github.com/zfogg/claude-git/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["claude_git*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--cov=claude_git --cov-report=term-missing --cov-report=html"
