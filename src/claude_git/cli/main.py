@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import click
 import git as gitpython
@@ -387,10 +387,11 @@ def rollback(commit_hash: str):
 
 
 @main.command()
-@click.argument("commit_ref") 
+@click.argument("commit_ref", required=False) 
 @click.option("--dry-run", is_flag=True, help="Show what would be reverted without making changes")
 @click.option("--interactive", "-i", is_flag=True, help="Interactively choose which changes to revert")
-def revert(commit_ref: str, dry_run: bool, interactive: bool):
+@click.option("--status", is_flag=True, help="Show revert history and restore options")
+def revert(commit_ref: str, dry_run: bool, interactive: bool, status: bool):
     """Revert Claude's changes from a specific commit or range.
     
     Supports git-style commit references:
@@ -409,6 +410,17 @@ def revert(commit_ref: str, dry_run: bool, interactive: bool):
         console.print("[red]Claude Git not initialized. Run 'claude-git init' first.[/red]")
         return
 
+    # Handle status flag - show revert history
+    if status:
+        _show_revert_status(claude_repo)
+        return
+    
+    # Require commit_ref if not using status
+    if not commit_ref:
+        console.print("[red]Error: COMMIT_REF is required when not using --status[/red]")
+        console.print("Use 'claude-git revert --status' to see revert history")
+        return
+
     try:
         # Parse the commit reference using our existing logic
         if ".." in commit_ref or "..." in commit_ref:
@@ -420,6 +432,43 @@ def revert(commit_ref: str, dry_run: bool, interactive: bool):
             
     except Exception as e:
         console.print(f"[red]Error reverting changes: {e}[/red]")
+
+
+@main.command()
+@click.argument("commit_ref") 
+@click.option("--dry-run", is_flag=True, help="Show what would be restored without making changes")
+@click.option("--interactive", "-i", is_flag=True, help="Interactively choose which changes to restore")
+@click.option("--force", is_flag=True, help="Force restore even if there are conflicts")
+def restore(commit_ref: str, dry_run: bool, interactive: bool, force: bool):
+    """Restore Claude's changes to a specific commit state (fast-forward navigation).
+    
+    This command allows you to move forward to a later Claude commit state,
+    effectively re-applying changes that may have been reverted.
+    
+    Supports git-style commit references:
+      claude-git restore HEAD                      # Restore to latest Claude state
+      claude-git restore HEAD~1                    # Restore to 1 commit ago state
+      claude-git restore <commit-hash>             # Restore to specific commit state
+      claude-git restore HEAD~5..HEAD             # Restore range of commits
+    """
+    project_root = _find_project_root()
+    if not project_root:
+        return
+    claude_repo = ClaudeGitRepository(project_root)
+    if not claude_repo.exists():
+        console.print("[red]Claude Git not initialized. Run 'claude-git init' first.[/red]")
+        return
+    try:
+        # Parse the commit reference using our existing logic
+        if ".." in commit_ref or "..." in commit_ref:
+            # Range of commits
+            _restore_commit_range(claude_repo, commit_ref, dry_run, interactive, force)
+        else:
+            # Single commit
+            _restore_single_commit(claude_repo, commit_ref, dry_run, interactive, force)
+            
+    except Exception as e:
+        console.print(f"[red]Error restoring changes: {e}[/red]")
 
 
 @main.command()
@@ -1384,6 +1433,18 @@ def _revert_single_commit(claude_repo, commit_ref: str, dry_run: bool, interacti
     
     console.print(f"[bold]Reverting Claude changes from {commit_hash[:8]}[/bold]")
     
+    # Enhanced safety check - warn about potential conflicts
+    safety_check = _check_revert_safety(claude_repo, commit_hash)
+    if safety_check["warnings"]:
+        console.print("[yellow]⚠️  Safety warnings:[/yellow]")
+        for warning in safety_check["warnings"]:
+            console.print(f"  • {warning}")
+        
+        if not safety_check["safe_to_revert"]:
+            if not click.confirm("Continue with revert despite warnings?", default=False):
+                console.print("[yellow]Revert cancelled[/yellow]")
+                return
+    
     # Get the changes for this commit
     diff_results = claude_repo.get_meaningful_diff_for_commit(commit_hash)
     
@@ -1418,6 +1479,8 @@ def _revert_single_commit(claude_repo, commit_ref: str, dry_run: bool, interacti
         console.print(f"[green]Would revert {reverted_count} change(s)[/green]")
     else:
         console.print(f"[green]Successfully reverted {reverted_count} change(s)[/green]")
+        # Track this revert for restore navigation
+        _track_revert(claude_repo, commit_hash)
 
 
 def _revert_commit_range(claude_repo, commit_range: str, dry_run: bool, interactive: bool):
@@ -1776,6 +1839,351 @@ def _pipe_to_pager(content: str) -> None:
     except Exception:
         # Fallback to direct output
         print(content)
+
+
+def _restore_single_commit(claude_repo, commit_ref: str, dry_run: bool, interactive: bool, force: bool):
+    """Restore changes to a specific commit state."""
+    # Resolve the commit reference to a hash
+    commit_hash = _resolve_commit_ref(claude_repo, commit_ref)
+    
+    console.print(f"[bold]Restoring to Claude commit state {commit_hash[:8]}[/bold]")
+    
+    # First, check safety if not forced
+    if not force:
+        safety_check = _check_restore_safety(claude_repo, commit_hash)
+        if not safety_check["safe_to_restore"]:
+            console.print("[red]⚠️  Unsafe to restore:[/red]")
+            for warning in safety_check["warnings"]:
+                console.print(f"  • {warning}")
+            if not click.confirm("Continue anyway?", default=False):
+                console.print("[yellow]Restore cancelled[/yellow]")
+                return
+    
+    # Get all files in the target commit state using git-native approach
+    files_to_restore = _get_files_at_commit(claude_repo, commit_hash)
+    
+    if not files_to_restore:
+        console.print(f"[yellow]No files found in commit {commit_hash[:8]}[/yellow]")
+        return
+    
+    changes_to_restore = []
+    
+    for file_path, file_content in files_to_restore.items():
+        current_file = claude_repo.project_root / file_path
+        
+        # Check if current file content differs from target state
+        current_content = ""
+        if current_file.exists():
+            try:
+                current_content = current_file.read_text(encoding='utf-8')
+            except Exception:
+                current_content = ""
+        
+        if current_content != file_content:
+            change_info = {
+                "file_path": file_path,
+                "current_content": current_content,
+                "target_content": file_content,
+                "action": "create" if not current_file.exists() else "modify"
+            }
+            
+            if interactive:
+                # Show the change and ask user
+                console.print(f"\n[bold]File: {file_path}[/bold]")
+                if change_info["action"] == "create":
+                    console.print(f"[green]+ Create new file ({len(file_content)} chars)[/green]")
+                else:
+                    console.print(f"[yellow]~ Modify existing file[/yellow]")
+                    console.print(f"  Current: {len(current_content)} chars")  
+                    console.print(f"  Target:  {len(file_content)} chars")
+                
+                if click.confirm(f"Restore this file?", default=True):
+                    changes_to_restore.append(change_info)
+            else:
+                changes_to_restore.append(change_info)
+    
+    if not changes_to_restore:
+        console.print("[green]Already at target commit state - nothing to restore[/green]")
+        return
+        
+    # Apply the restores
+    restored_count = 0
+    for change in changes_to_restore:
+        if _apply_restore_change(change, dry_run):
+            restored_count += 1
+    
+    if dry_run:
+        console.print(f"[green]Would restore {restored_count} file(s)[/green]")
+    else:
+        console.print(f"[green]Successfully restored {restored_count} file(s) to commit {commit_hash[:8]}[/green]")
+
+
+def _restore_commit_range(claude_repo, commit_range: str, dry_run: bool, interactive: bool, force: bool):
+    """Restore changes for a range of commits."""
+    console.print(f"[bold]Restoring commit range: {commit_range}[/bold]")
+    
+    # For ranges, we restore to the final state of the range
+    # Parse range to get target commit
+    if "..." in commit_range:
+        start_ref, end_ref = commit_range.split("...", 1)
+    else:
+        start_ref, end_ref = commit_range.split("..", 1)
+    
+    # Restore to the end commit state
+    _restore_single_commit(claude_repo, end_ref, dry_run, interactive, force)
+
+
+def _check_revert_safety(claude_repo, commit_hash: str) -> Dict:
+    """Check if it's safe to revert the specified commit."""
+    safety_info = {
+        "safe_to_revert": True,
+        "warnings": [],
+        "conflicts": []
+    }
+    
+    try:
+        # Check current parent repo status
+        current_status = claude_repo._get_parent_repo_status()
+        if current_status and current_status.get("has_changes", False):
+            safety_info["warnings"].append(
+                "Working directory has uncommitted changes - revert may cause conflicts"
+            )
+            safety_info["safe_to_revert"] = False
+        
+        # Get files that would be affected by revert using git-native approach
+        try:
+            affected_files = _get_files_at_commit(claude_repo, commit_hash)
+            
+            for file_path in affected_files.keys():
+                current_file = claude_repo.project_root / file_path
+                
+                # Check if file was modified by user
+                if current_status:
+                    modified_files = current_status.get("modified_files", [])
+                    if str(file_path) in modified_files:
+                        safety_info["conflicts"].append(file_path)
+                        safety_info["warnings"].append(
+                            f"File {file_path} has user modifications - revert may conflict"
+                        )
+                        safety_info["safe_to_revert"] = False
+        
+        except Exception as e:
+            safety_info["warnings"].append(f"Could not analyze affected files: {e}")
+        
+        # Check if we have many conflicts
+        if len(safety_info["conflicts"]) > 0:
+            safety_info["warnings"].append(
+                f"Found {len(safety_info['conflicts'])} file(s) with potential conflicts"
+            )
+    
+    except Exception as e:
+        safety_info["warnings"].append(f"Error checking revert safety: {e}")
+        safety_info["safe_to_revert"] = False
+    
+    return safety_info
+
+
+def _check_restore_safety(claude_repo, target_commit_hash: str) -> Dict:
+    """Check if it's safe to restore to the target commit state."""
+    safety_info = {
+        "safe_to_restore": True,
+        "warnings": [],
+        "conflicts": []
+    }
+    
+    try:
+        # Check current parent repo status
+        current_status = claude_repo._get_parent_repo_status()
+        if current_status and current_status.get("has_changes", False):
+            safety_info["warnings"].append(
+                "Working directory has uncommitted changes - restore may conflict"
+            )
+            safety_info["safe_to_restore"] = False
+        
+        # Get files that would be affected by restore
+        target_files = _get_files_at_commit(claude_repo, target_commit_hash)
+        
+        for file_path in target_files.keys():
+            current_file = claude_repo.project_root / file_path
+            
+            # Check if file was modified by user since last Claude change
+            if current_status:
+                modified_files = current_status.get("modified_files", [])
+                if str(file_path) in modified_files:
+                    safety_info["conflicts"].append(file_path)
+                    safety_info["warnings"].append(
+                        f"File {file_path} has user modifications - restore will overwrite them"
+                    )
+                    safety_info["safe_to_restore"] = False
+        
+        if safety_info["conflicts"]:
+            safety_info["warnings"].append(
+                f"Found {len(safety_info['conflicts'])} file(s) with potential conflicts"
+            )
+    
+    except Exception as e:
+        safety_info["warnings"].append(f"Error checking restore safety: {e}")
+        safety_info["safe_to_restore"] = False
+    
+    return safety_info
+
+
+def _get_files_at_commit(claude_repo, commit_hash: str) -> Dict[str, str]:
+    """Get all files and their content at a specific commit using git-native approach."""
+    files = {}
+    
+    try:
+        # Use git to get the file tree at the specific commit in .claude-git repo
+        result = claude_repo.run_git_command([
+            "ls-tree", "-r", "--name-only", commit_hash, "files/"
+        ])
+        
+        if not result or not result.strip():
+            return files
+            
+        file_paths = result.strip().split('\n')
+        
+        for git_file_path in file_paths:
+            if git_file_path.startswith("files/"):
+                # Remove "files/" prefix to get actual file path
+                actual_file_path = git_file_path[6:]  # Remove "files/"
+                
+                # Get file content at this commit
+                try:
+                    content_result = claude_repo.run_git_command([
+                        "show", f"{commit_hash}:{git_file_path}"
+                    ])
+                    files[actual_file_path] = content_result
+                except Exception:
+                    # File might not exist at this commit
+                    continue
+    
+    except Exception as e:
+        console.print(f"[yellow]Warning: Error getting files at commit {commit_hash[:8]}: {e}[/yellow]")
+    
+    return files
+
+
+def _apply_restore_change(change_info: Dict, dry_run: bool) -> bool:
+    """Apply a single restore change. Returns True if successful."""
+    try:
+        file_path = change_info["file_path"]
+        target_content = change_info["target_content"]
+        current_file = Path.cwd() / file_path
+        
+        if dry_run:
+            action = change_info["action"]
+            if action == "create":
+                console.print(f"[green]Would create {file_path}[/green]")
+            else:
+                console.print(f"[yellow]Would modify {file_path}[/yellow]")
+            return True
+        
+        # Ensure parent directory exists
+        current_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write the target content
+        current_file.write_text(target_content, encoding='utf-8')
+        
+        action = change_info["action"]
+        if action == "create":
+            console.print(f"[green]Created {file_path}[/green]")
+        else:
+            console.print(f"[blue]Restored {file_path}[/blue]")
+        
+        return True
+        
+    except Exception as e:
+        console.print(f"[red]Error restoring {change_info.get('file_path', 'unknown')}: {e}[/red]")
+        return False
+
+
+def _track_revert(claude_repo, commit_hash: str):
+    """Track a revert operation for easy restore navigation."""
+    try:
+        from datetime import datetime
+        
+        revert_history_file = claude_repo.claude_git_dir / "revert_history.json"
+        
+        # Load existing history
+        history = []
+        if revert_history_file.exists():
+            try:
+                history = json.loads(revert_history_file.read_text())
+            except Exception:
+                history = []
+        
+        # Add new revert entry
+        revert_entry = {
+            "commit_hash": commit_hash,
+            "reverted_at": datetime.now().isoformat(),
+            "parent_repo_hash": claude_repo._get_parent_repo_hash(),
+            "restore_command": f"claude-git restore {commit_hash}"
+        }
+        
+        # Keep only last 20 reverts to avoid bloat
+        history.insert(0, revert_entry)
+        history = history[:20]
+        
+        # Save history
+        revert_history_file.write_text(json.dumps(history, indent=2))
+        
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not track revert: {e}[/yellow]")
+
+
+def _show_revert_status(claude_repo):
+    """Show revert history and restore navigation options."""
+    revert_history_file = claude_repo.claude_git_dir / "revert_history.json"
+    
+    if not revert_history_file.exists():
+        console.print("[yellow]No revert history found.[/yellow]")
+        console.print("Revert some changes first, then use 'claude-git revert --status' to see restore options.")
+        return
+    
+    try:
+        history = json.loads(revert_history_file.read_text())
+        
+        if not history:
+            console.print("[yellow]No revert history found.[/yellow]")
+            return
+            
+        console.print("[bold cyan]Claude Git Revert History[/bold cyan]")
+        console.print("[dim]Recent reverts (newest first). Use these commands to restore to previous states:[/dim]\n")
+        
+        for i, entry in enumerate(history):
+            commit_hash = entry["commit_hash"]
+            reverted_at = entry.get("reverted_at", "unknown")
+            restore_cmd = entry.get("restore_command", f"claude-git restore {commit_hash}")
+            
+            # Format timestamp
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(reverted_at.replace('Z', '+00:00'))
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                time_str = reverted_at
+            
+            # Show commit info
+            try:
+                # Get commit message from claude-git log
+                result = claude_repo.run_git_command([
+                    "show", "--format=%s", "--no-patch", commit_hash
+                ])
+                commit_msg = result.strip() if result else "No message"
+            except:
+                commit_msg = "Unknown commit"
+            
+            console.print(f"[dim]{i+1:2}.[/dim] [bold yellow]{commit_hash[:8]}[/bold yellow] - {commit_msg[:60]}")
+            console.print(f"    [dim]Reverted: {time_str}[/dim]")
+            console.print(f"    [green]Restore: {restore_cmd}[/green]")
+            if i < len(history) - 1:  # Don't add newline after last entry
+                console.print()
+        
+        console.print(f"\n[dim]Showing {len(history)} recent reverts. Use the restore commands above to return to previous states.[/dim]")
+        
+    except Exception as e:
+        console.print(f"[red]Error reading revert history: {e}[/red]")
 
 
 def _find_project_root() -> Optional[Path]:
