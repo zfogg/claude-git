@@ -3,21 +3,21 @@
 
 import json
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, List
 
-from claude_git.core.repository import ClaudeGitRepository
-from claude_git.models.change import Change, ChangeType
+from claude_git.core.git_native_repository import GitNativeRepository
 
 
-def extract_latest_tool_from_transcript(transcript_path: str, debug_log: Path) -> Dict[str, Any]:
+def extract_latest_tool_from_transcript(
+    transcript_path: str, debug_log: Path
+) -> Dict[str, Any]:
     """Extract the latest tool call from the transcript file."""
     try:
-        with open(transcript_path, 'r') as f:
+        with open(transcript_path) as f:
             lines = f.readlines()
-        
+
         # Look for the last tool call in the transcript
         for line in reversed(lines):
             try:
@@ -26,22 +26,21 @@ def extract_latest_tool_from_transcript(transcript_path: str, debug_log: Path) -
                 if entry.get("type") == "assistant" and "message" in entry:
                     content = entry["message"].get("content", [])
                     if isinstance(content, list):
-                        for item in reversed(content):  # Get the last tool in the message
+                        for item in reversed(
+                            content
+                        ):  # Get the last tool in the message
                             if item.get("type") == "tool_use":
                                 tool_name = item.get("name", "")
                                 if tool_name in ["Edit", "Write", "MultiEdit"]:
                                     parameters = item.get("input", {})
-                                    return {
-                                        "name": tool_name,
-                                        "parameters": parameters
-                                    }
+                                    return {"name": tool_name, "parameters": parameters}
             except (json.JSONDecodeError, KeyError):
                 continue
-                
+
         with open(debug_log, "a") as f:
             f.write("No matching tool calls found in transcript\n")
         return {}
-        
+
     except Exception as e:
         with open(debug_log, "a") as f:
             f.write(f"Error reading transcript: {e}\n")
@@ -57,84 +56,190 @@ def parse_hook_input(hook_input: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-def determine_change_type(tool_name: str) -> ChangeType:
-    """Determine the change type from tool name."""
-    tool_mapping = {
-        "Edit": ChangeType.EDIT,
-        "Write": ChangeType.WRITE,
-        "MultiEdit": ChangeType.MULTI_EDIT,
-    }
-    return tool_mapping.get(tool_name, ChangeType.EDIT)
-
-
-def get_file_content_before_change(file_path: Path) -> str:
-    """Get the content of a file before Claude's change."""
+def sync_file_to_claude_repo(
+    file_path: Path, project_root: Path, claude_git_dir: Path, debug_log: Path
+) -> bool:
+    """Sync a changed file from main repo to claude-git repo."""
     try:
+        # Get relative path from project root
+        relative_path = file_path.relative_to(project_root)
+        claude_git_file = claude_git_dir / relative_path
+
+        # Create parent directories if needed
+        claude_git_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Copy file content from main repo to claude-git repo
         if file_path.exists():
-            return file_path.read_text(encoding='utf-8')
-        return ""
-    except Exception:
-        return ""
+            import shutil
+
+            shutil.copy2(file_path, claude_git_file)
+        else:
+            # File was deleted, remove from claude-git too
+            if claude_git_file.exists():
+                claude_git_file.unlink()
+
+        return True
+    except Exception as e:
+        with open(debug_log, "a") as f:
+            f.write(f"Error syncing file {file_path}: {e}\n")
+        return False
 
 
-def extract_change_info(tool_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract change information from tool data."""
+def extract_changed_files(tool_data: Dict[str, Any]) -> List[Path]:
+    """Extract list of changed files from tool data."""
     tool_name = tool_data.get("name", "")
     parameters = tool_data.get("parameters", {})
-    
-    change_info = {
-        "tool_name": tool_name,
-        "file_path": parameters.get("file_path"),
-        "old_string": parameters.get("old_string"),
-        "new_string": parameters.get("new_string"),
-        "content": parameters.get("content"),
-        "edits": parameters.get("edits", []),
-    }
-    
-    return change_info
+
+    changed_files = []
+
+    # Extract file path(s) depending on tool type
+    if tool_name in ["Edit", "Write"] or tool_name == "MultiEdit":
+        file_path_str = parameters.get("file_path")
+        if file_path_str:
+            changed_files.append(Path(file_path_str))
+
+    return changed_files
 
 
-def create_change_record(tool_data: Dict[str, Any], session_id: str) -> Change:
-    """Create a Change record from tool data."""
-    change_info = extract_change_info(tool_data)
-    
-    # Check if file_path is None and handle gracefully
-    file_path_str = change_info["file_path"]
-    if not file_path_str:
-        # Log the error and exit gracefully
-        debug_log = Path.home() / ".claude" / "claude-git-debug.log"
+def extract_thinking_text_from_transcript(
+    transcript_path: str, debug_log: Path
+) -> List[str]:
+    """Extract Claude's thinking text from the transcript file."""
+    try:
+        with open(transcript_path) as f:
+            lines = f.readlines()
+
+        # Look for recent thinking messages in Claude Code format
+        recent_thinking = []
+        for line in lines[-100:]:  # Check last 100 lines for recent context
+            try:
+                entry = json.loads(line.strip())
+
+                # Check if this is an assistant message entry
+                if (
+                    entry.get("type") == "assistant"
+                    and "message" in entry
+                    and entry["message"].get("role") == "assistant"
+                ):
+                    content = entry["message"].get("content", [])
+                    if isinstance(content, list):
+                        for item in content:
+                            # Look for thinking text - it might be marked differently
+                            if item.get("type") == "text" and item.get(
+                                "thinking", False
+                            ):
+                                thinking_text = item.get("text", "").strip()
+                                if thinking_text and len(thinking_text) < 500:
+                                    recent_thinking.append(thinking_text)
+                            # Also check for text without explicit thinking flag but with context
+                            elif (
+                                item.get("type") == "text"
+                                and "thinking" not in item  # No explicit thinking field
+                                and len(item.get("text", "")) < 200
+                            ):  # Short, likely internal thought
+                                text = item.get("text", "").strip()
+                                # Filter for thinking-like patterns
+                                if text and any(
+                                    phrase in text.lower()
+                                    for phrase in [
+                                        "i need to",
+                                        "let me",
+                                        "i should",
+                                        "i'll",
+                                        "i want to",
+                                        "thinking about",
+                                        "looking at",
+                                        "checking",
+                                        "verifying",
+                                    ]
+                                ):
+                                    recent_thinking.append(text)
+
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        # Return the most recent thinking texts (last few)
+        filtered_thinking = recent_thinking[-5:] if recent_thinking else []
+
         with open(debug_log, "a") as f:
-            f.write(f"Error: file_path is None in tool data: {tool_data}\n")
-        return None
-    
-    file_path = Path(file_path_str)
-    
-    # Get content before change for Edit operations
-    old_content = None
-    if change_info["tool_name"] == "Edit":
-        old_content = get_file_content_before_change(file_path)
-    
-    # For Write operations, get new content
-    new_content = change_info.get("content", "")
-    if change_info["tool_name"] == "Edit":
-        # For edits, we'll need to reconstruct the new content
-        # This is complex and might need the actual file reading after the change
-        new_content = file_path.read_text(encoding='utf-8') if file_path.exists() else ""
-    
-    change = Change(
-        id=str(uuid.uuid4()),
-        session_id=session_id,
-        timestamp=datetime.now(),
-        change_type=determine_change_type(change_info["tool_name"]),
-        file_path=file_path,
-        old_content=old_content,
-        new_content=new_content,
-        old_string=change_info.get("old_string"),
-        new_string=change_info.get("new_string"),
-        tool_input=tool_data,
-    )
-    
-    return change
+            f.write(
+                f"Extracted {len(filtered_thinking)} thinking texts from transcript\n"
+            )
+
+        return filtered_thinking
+
+    except Exception as e:
+        with open(debug_log, "a") as f:
+            f.write(f"Error extracting thinking text: {e}\n")
+        return []
+
+
+def git_commit_change(
+    claude_git_dir: Path,
+    changed_files: List[Path],
+    tool_data: Dict[str, Any],
+    project_root: Path,
+    debug_log: Path,
+    transcript_path: str = None,
+) -> bool:
+    """Create a git commit for the changes."""
+    try:
+        import subprocess
+
+        # Add changed files to git using relative paths
+        for file_path in changed_files:
+            # Get the relative path from project root
+            relative_path = file_path.relative_to(project_root)
+            git_add_result = subprocess.run(
+                ["git", "-C", str(claude_git_dir), "add", str(relative_path)],
+                capture_output=True,
+                text=True,
+            )
+            if git_add_result.returncode != 0:
+                with open(debug_log, "a") as f:
+                    f.write(
+                        f"Git add failed for {relative_path}: {git_add_result.stderr}\n"
+                    )
+
+        # Extract thinking text from transcript
+        thinking_texts = []
+        if transcript_path and Path(transcript_path).exists():
+            thinking_texts = extract_thinking_text_from_transcript(
+                transcript_path, debug_log
+            )
+
+        # Create enhanced commit message with thinking
+        tool_name = tool_data.get("name", "unknown")
+        file_names = [f.name for f in changed_files]
+
+        if thinking_texts:
+            # Use thinking text as primary message
+            primary_message = "\n\n".join(thinking_texts)
+            commit_msg = (
+                f"{primary_message}\n\nTool: {tool_name} on {', '.join(file_names)}"
+            )
+        else:
+            # Fallback to simple tool message
+            commit_msg = f"Claude {tool_name}: {', '.join(file_names)}"
+
+        # Commit the changes
+        git_commit_result = subprocess.run(
+            ["git", "-C", str(claude_git_dir), "commit", "-m", commit_msg],
+            capture_output=True,
+            text=True,
+        )
+
+        if git_commit_result.returncode != 0:
+            with open(debug_log, "a") as f:
+                f.write(f"Git commit failed: {git_commit_result.stderr}\n")
+            return False
+
+        return True
+
+    except Exception as e:
+        with open(debug_log, "a") as f:
+            f.write(f"Error creating git commit: {e}\n")
+        return False
 
 
 def main():
@@ -142,8 +247,8 @@ def main():
     # Debug: log that the hook was called
     debug_log = Path.home() / ".claude" / "claude-git-debug.log"
     with open(debug_log, "a") as f:
-        f.write(f"Hook called at {datetime.now()}: argv={sys.argv}\n")
-    
+        f.write(f"Git-native hook called at {datetime.now()}: argv={sys.argv}\n")
+
     # Get hook input - Claude Code passes JSON through stdin
     hook_input = ""
     try:
@@ -155,21 +260,18 @@ def main():
     except Exception as e:
         with open(debug_log, "a") as f:
             f.write(f"Error reading input: {e}\n")
-    
+        sys.exit(0)  # Exit gracefully
+
     if not hook_input:
         with open(debug_log, "a") as f:
             f.write("No hook input provided\n")
         sys.exit(0)  # Exit gracefully instead of error
-    
+
     with open(debug_log, "a") as f:
         f.write(f"Hook input: {hook_input[:200]}...\n")
-    
+
     hook_data = parse_hook_input(hook_input)
-    
-    # The JSON structure from Claude Code looks like:
-    # {"session_id": "...", "transcript_path": "...", "cwd": "...", "tool": {...}, ...}
-    # or it might have tool data in different structure
-    
+
     # Check if this has tool information
     tool_data = hook_data.get("tool", {})
     if not tool_data:
@@ -178,7 +280,7 @@ def main():
         if transcript_path and Path(transcript_path).exists():
             with open(debug_log, "a") as f:
                 f.write(f"No direct tool data, reading transcript: {transcript_path}\n")
-            
+
             tool_data = extract_latest_tool_from_transcript(transcript_path, debug_log)
             if not tool_data:
                 with open(debug_log, "a") as f:
@@ -188,46 +290,61 @@ def main():
             with open(debug_log, "a") as f:
                 f.write("No tool data and no transcript path\n")
             sys.exit(0)
-    
+
     tool_name = tool_data.get("name", "")
     if tool_name not in ["Edit", "Write", "MultiEdit"]:
         with open(debug_log, "a") as f:
             f.write(f"Tool {tool_name} not tracked, exiting\n")
         sys.exit(0)
-    
+
     # Find the project root (look for .git directory)
     current_dir = Path.cwd()
     project_root = None
-    
+
     for parent in [current_dir] + list(current_dir.parents):
         if (parent / ".git").exists():
             project_root = parent
             break
-    
+
     if not project_root:
-        print("No git repository found", file=sys.stderr)
-        sys.exit(1)
-    
-    # Initialize or get existing Claude Git repository
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
-        claude_repo.init()
-    
-    # Get or create current session
-    session = claude_repo.get_or_create_current_session()
-    
-    # Create change record
-    change = create_change_record(tool_data, session.id)
-    
-    if change is None:
         with open(debug_log, "a") as f:
-            f.write("Failed to create change record, skipping\n")
+            f.write("No git repository found\n")
         sys.exit(0)
-    
-    # Store the change
-    claude_repo.add_change(change)
-    
-    print(f"Captured change: {change.id} in session: {session.id}")
+
+    # Check if claude-git repository exists
+    claude_git_dir = project_root / ".claude-git"
+    if not (claude_git_dir.exists() and (claude_git_dir / ".git").exists()):
+        with open(debug_log, "a") as f:
+            f.write("No claude-git repository found, skipping\n")
+        sys.exit(0)
+
+    # Initialize git-native repository manager
+    git_repo = GitNativeRepository(project_root)
+    if not git_repo.exists():
+        with open(debug_log, "a") as f:
+            f.write("Claude-git not properly initialized, skipping\n")
+        sys.exit(0)
+
+    # Extract changed files from tool data
+    changed_files = extract_changed_files(tool_data)
+    if not changed_files:
+        with open(debug_log, "a") as f:
+            f.write("No changed files found, skipping\n")
+        sys.exit(0)
+
+    # Accumulate changes for each file (session-based approach)
+    # This will only add to accumulated changes if session is active,
+    # or create immediate commit if no session is active
+    for file_path in changed_files:
+        try:
+            git_repo.accumulate_change(
+                str(file_path), tool_name, tool_data.get("parameters", {})
+            )
+            with open(debug_log, "a") as f:
+                f.write(f"✅ Accumulated change: {tool_name} on {file_path}\n")
+        except Exception as e:
+            with open(debug_log, "a") as f:
+                f.write(f"❌ Error accumulating change for {file_path}: {e}\n")
 
 
 if __name__ == "__main__":

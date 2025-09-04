@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 class ChangeType(str, Enum):
     """Type of change made by Claude."""
-    
+
     EDIT = "edit"
     WRITE = "write"
     MULTI_EDIT = "multi_edit"
@@ -18,7 +18,7 @@ class ChangeType(str, Enum):
 
 class Change(BaseModel):
     """Represents a single change made by Claude."""
-    
+
     id: str
     session_id: str
     timestamp: datetime
@@ -29,9 +29,11 @@ class Change(BaseModel):
     old_string: Optional[str] = None  # For edit operations
     new_string: Optional[str] = None  # For edit operations
     tool_input: dict  # Raw tool input from hook
-    parent_repo_hash: Optional[str] = None  # Git hash of parent repo when change was made
-    parent_repo_status: Optional[Dict] = None  # Status of parent repo to detect human changes
-    
-    model_config = {
-        "arbitrary_types_allowed": True
-    }
+    parent_repo_hash: Optional[str] = (
+        None  # Git hash of parent repo when change was made
+    )
+    parent_repo_status: Optional[Dict] = (
+        None  # Status of parent repo to detect human changes
+    )
+
+    model_config = {"arbitrary_types_allowed": True}

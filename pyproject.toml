@@ -78,4 +78,73 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "--cov=claude_git --cov-report=term-missing --cov-report=html"
+addopts = "--cov=claude_git --cov-report=term-missing --cov-report=html --testmon"
+testmon_ignore_dependencies = ["setuptools", "pip", "wheel"]
+
+[dependency-groups]
+dev = [
+    "pytest-testmon>=2.1.3",
+    "ruff>=0.12.11",
+]
+
+[tool.ruff]
+target-version = "py38"
+line-length = 88
+indent-width = 4
+
+exclude = [
+    ".git",
+    ".claude-git", 
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings  
+    "F",    # Pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "S",    # bandit security
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "PIE",  # flake8-pie
+    "RET",  # flake8-return
+    "SIM",  # flake8-simplify
+]
+
+ignore = [
+    "S101",  # Use of assert
+    "A003",  # Builtin attribute shadowing
+    "S603",  # subprocess calls (many are intentional git commands)
+    "S607",  # subprocess partial paths (git is in PATH) 
+    "S110",  # try-except-pass (sometimes appropriate)
+    "E722",  # bare except (sometimes appropriate)
+    "S108",  # temporary file usage (test files)
+    "E501",  # line too long (let formatter handle)
+    "S112",  # try-except-continue (sometimes appropriate)
+    "SIM108", # ternary operator preference
+    "SIM102", # nested if statements (sometimes clearer)
+    "B904",  # raise from err (not always needed)
+]
+
+fixable = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["claude_git"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

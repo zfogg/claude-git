@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/zfogg/src/github.com/zfogg/claude-git/src/claude_git/hooks/session_start.py"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/zfogg/src/github.com/zfogg/claude-git/src/claude_git/hooks/session_end.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/zfogg/src/github.com/zfogg/claude-git/src/claude_git/hooks/capture.py"
+          }
+        ]
+      }
+    ]
+  }
+}

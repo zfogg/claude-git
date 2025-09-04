@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Pre-commit hook to run ruff linting and auto-formatting
+
+set -e
+
+echo "🔍 Running ruff linter and formatter..."
+
+# Check if ruff is available
+if ! command -v uv &> /dev/null; then
+    echo "❌ uv not found - cannot run ruff"
+    exit 1
+fi
+
+# Get list of staged Python files
+staged_files=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+
+if [ -z "$staged_files" ]; then
+    echo "✅ No Python files staged for commit"
+    exit 0
+fi
+
+echo "📁 Processing staged Python files:"
+echo "$staged_files" | sed 's/^/  - /'
+
+# Auto-format files first
+echo "🎨 Auto-formatting code..."
+if ! uv run ruff format $staged_files; then
+    echo ""
+    echo "❌ Ruff formatting failed!"
+    echo "💡 Check file syntax and try again"
+    echo "💡 Or skip with: git commit --no-verify"
+    exit 1
+fi
+
+# Check if formatting made changes and re-stage them
+for file in $staged_files; do
+    if ! git diff --quiet "$file"; then
+        echo "  📝 Formatted: $file"
+        git add "$file"
+    fi
+done
+
+# Run ruff check on staged files
+echo "🧹 Running ruff check..."
+if ! uv run ruff check $staged_files; then
+    echo ""
+    echo "❌ Ruff linting failed!"
+    echo "💡 Fix issues with: uv run ruff check --fix $staged_files"
+    echo "💡 Or skip with: git commit --no-verify"
+    exit 1
+fi
+
+echo "✅ All checks passed! Code formatted and staged."

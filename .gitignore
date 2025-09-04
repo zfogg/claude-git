@@ -72,3 +72,7 @@ Thumbs.db
 # Claude Git test repositories
 test_projects/
 .claude-git
+
+.testmondata*
+
+.claude/settings.local.json
