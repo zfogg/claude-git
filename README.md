@@ -1,69 +1,136 @@
-# 🔄 Claude Git - Intelligent Dual-Repository Version Control for AI Development
+# 🔄 Claude Git - Professional AI-Human Collaboration with Fork-Based Version Control
 
-A revolutionary git-native version control system that creates **logical commit boundaries** around Claude's work while maintaining perfect synchronization with your main repository. Experience unprecedented visibility and control over AI-human collaborative development.
+The **first version control system designed for AI pair programming**. Claude Git treats AI as a proper development partner with full git workflow integration, professional commit attribution, and transparent collaboration tracking.
 
-## 🎯 Revolutionary Architecture: Git-Native Dual Repository System
+## 🎯 Revolutionary Fork-Based Architecture
 
-Claude Git creates two synchronized git repositories with intelligent commit mapping:
+Claude Git creates a **true git fork** of your repository where AI works as an independent developer:
 
 - **Main Repository**: Your normal git workflow - commit when YOU decide
-- **Claude-Git Repository**: Auto-commits EVERY change (yours + Claude's) with logical boundaries
-- **Intelligent Mapping**: Bidirectional commit relationships enable powerful navigation
+- **Claude-Git Fork**: Real git fork (`git remote add upstream ../`) where Claude works on dedicated branches
+- **Professional Integration**: Use standard `git merge`, `git cherry-pick`, and `git diff` to incorporate Claude's work
+- **Complete Transparency**: Full audit trail of AI contributions with reasoning preserved
 
-### Why This Changes Everything
+### The Professional AI Collaboration Problem
 
-Instead of micro-managing individual file edits, Claude Git now creates **logical work units**:
+**Current Reality:** AI-generated code is everywhere, but completely untracked:
 
 ```bash
-# OLD APPROACH: Micro-commits per file edit
-claude: edit auth.py line 45
-claude: edit auth.py line 52  
-claude: write user.py
-claude: edit config.py line 12
+# Today's broken workflow:
+1. Developer: "Claude, implement authentication system"
+2. Claude writes 200 lines across 5 files
+3. Developer commits: "Add authentication"
+4. 6 months later: "Why did I implement it this way?" (You didn't - Claude did)
+5. Git blame shows developer's name, not Claude's contribution
+6. Claude's reasoning and context: COMPLETELY LOST
+```
 
-# NEW APPROACH: Logical work boundaries
-claude: implement complete user authentication system
-  - Created User class with validation in user.py
-  - Added JWT middleware in auth.py (lines 45-67)  
-  - Updated configuration for auth settings
-  - 47 lines added, 12 modified across 3 files
-  Main-repo-context: abc123def (user was implementing payment feature)
+**Claude Git's Solution - Professional AI Attribution:**
+
+```bash
+# Revolutionary fork-based workflow:
+1. Claude works on dedicated branch: claude-session-auth
+2. Each Claude commit preserves thinking: "Planning JWT middleware approach..."
+3. Developer reviews Claude's work: git diff claude/claude-session-auth
+4. Professional integration: git merge claude/claude-session-auth
+5. Result: Claude's contributions properly attributed with full context preserved
+
+# Git history shows truth:
+abc123 John: Add payment integration
+def456 Claude: Planning auth system - need JWT middleware and validation
+ghi789 Claude: Created User class with proper validation methods  
+jkl012 Claude: Added JWT token generation in auth middleware
+mno345 John: Updated auth config for production
 ```
 
 ## 🚀 Core Capabilities
 
-### 🧠 Context-Aware Development Intelligence
-- **Work Context Mapping**: See what Claude accomplished during specific main repo development phases
-- **Logical Change Boundaries**: Claude's commits represent complete thoughts, not individual keystrokes
-- **Collaborative Timeline**: Interleaved view of your commits and Claude's logical work units
-- **Selective Restoration**: "Revert to my change, include/exclude specific Claude work"
+### 🤝 Professional AI-Human Git Workflows
+- **Fork-Based Collaboration**: Claude works on proper git branches in a real fork of your repo
+- **Standard Git Integration**: Use `git merge claude/session-name`, `git cherry-pick`, `git diff` 
+- **AI Commit Attribution**: Every Claude commit shows "Author: Claude" with full reasoning preserved
+- **Selective Integration**: Cherry-pick the AI changes you want, leave what you don't
+- **Mid-Session Branch Switching**: User switches branches → Claude auto-commits and continues seamlessly
 
-### 🔄 Perfect Repository Synchronization
-- **File-Level Sync**: Both repos always contain identical files
-- **Commit Granularity Difference**: Main repo has intentional commits, claude-git has auto-commits
-- **Bidirectional Mapping**: Navigate between repos using commit references
-- **Smart Conflict Resolution**: Automatic detection and resolution strategies
+### 🔍 Complete AI Transparency & Auditability
+- **AI Attribution Tracking**: `git log --author="Claude"` shows all AI contributions
+- **Thinking Text Preservation**: Every Claude commit includes reasoning: "Planning auth approach..."
+- **Professional Code Review**: Review AI work like any team member before merging
+- **Enterprise Compliance**: Full audit trail for AI-generated code with git-native tools
+- **Context Preservation**: 6 months later, understand why Claude chose specific approaches
 
-### ⚡ Git-Native Operations
-- **Standard Git Commands**: `git diff`, `git log`, `git revert` - no custom implementations
-- **Dual Data Storage**: Commit messages for human readability + git notes for complex queries
-- **Query Optimization**: Use fastest method for each query type (grep vs notes search)
+### 🌳 Revolutionary Session Worktrees
+- **Multi-Session Isolation**: Multiple Claude sessions work concurrently in separate worktrees
+- **Real-Time Test Integration**: Each session gets independent pytest-testmon for live feedback
+- **Session Branch Management**: Each session works on `claude-session-{id}` branches
+- **Smart Session Merging**: Merge compatible sessions, handle conflicts intelligently
 - **Branch Operations**: Create branches in claude-git, selectively merge to main
 - **Professional Git Tooling**: Use any git tool (tig, gitk, VSCode) on Claude's work
 
 ## 🏗 Architecture Deep Dive
 
-### Repository Structure
+### Fork-Based Repository Structure
 ```
 project-root/
 ├── .git/                           # Main repository (user-controlled)
-├── src/                           # Your project files
-├── .claude-git/                   # Claude-git repository (auto-managed)
-│   ├── .git/                      # Full git repository
+├── src/                           # Your project files  
+├── .claude-git/                   # TRUE GIT FORK of your repository
+│   ├── .git/                      # Full git repository (fork)
+│   │   ├── refs/remotes/upstream/  # Points to ../. (your repo)
 │   │   └── refs/notes/commits     # Git notes storage (structured data)
-│   ├── src/                       # Mirror of project structure (no files/ wrapper)
-│   └── .claude-git-config.json    # Configuration
+│   ├── src/                       # IDENTICAL project structure 
+│   └── worktree/                  # Session worktrees
+│       ├── session-auth-abc123/   # Isolated session workspace
+│       └── session-ui-def456/     # Another concurrent session
 ```
+
+**Key Architecture Benefits:**
+- **Real Git Fork**: `cd .claude-git && git remote -v` shows `upstream: ../`
+- **Shared Git History**: Both repos share same commit ancestry  
+- **Professional Workflows**: `git merge upstream/main`, `git fetch upstream`
+- **Performance Optimized**: `git clone --reference` shares objects, minimal disk usage
+
+**🚀 Revolutionary Auto-Commit + Squash Workflow:**
+
+The fork architecture enables a groundbreaking development workflow where every single change is automatically preserved, then intelligently organized for professional integration:
+
+**How It Works:**
+1. **Continuous Auto-Commit**: Every file change Claude makes is immediately committed to the fork
+2. **Complete Change Capture**: User changes, Claude changes - everything is preserved with full context
+3. **Intelligent Squashing**: When Claude stops coding, related commits are squashed into logical units
+4. **Cherry-Pickable Results**: Each squashed commit becomes a professional, mergeable unit of work
+
+**Example Auto-Commit + Squash Flow:**
+```bash
+# During Claude session - auto-commits every change:
+Auto-commit 1: "Start auth implementation - create User class"
+Auto-commit 2: "Add JWT token validation method"  
+Auto-commit 3: "Handle user config changes"
+Auto-commit 4: "Fix validation logic for edge cases"
+Auto-commit 5: "Add error handling for expired tokens"
+
+# Session ends - intelligent squashing:
+git rebase -i HEAD~5  # Squash related commits
+Final commit: "Planning authentication system - JWT middleware and validation
+
+I started by creating a User class with proper validation methods, 
+then added JWT token generation in the auth middleware. The config 
+needed auth settings for token expiration and secret keys.
+
+Handled edge cases: expired tokens, invalid credentials, rate limiting.
+The user wanted this to integrate with their existing OAuth setup.
+
+Files: auth.py, user.py, config.py
+Parent-Repo: abc123def456
+Session: session-789"
+```
+
+**Professional Integration Benefits:**
+- **Perfect Changesets**: Each squashed commit contains the COMPLETE changeset needed to integrate a feature
+- **User Changes Included**: If user switched branches or made changes during the session, those are included in the final commit
+- **Cherry-Pick Ready**: `git cherry-pick claude/session-auth` brings the complete auth implementation
+- **Audit Trail**: Full development history preserved in auto-commits, logical units in squashed commits
+- **Risk-Free Integration**: Review squashed commits, cherry-pick what you want
 
 ### Data Storage Philosophy
 
@@ -97,28 +164,42 @@ git notes add -m '{"parent_repo":"abc123def456","thinking":"Planning auth..."}' 
 
 ## 🎣 Hook Integration Strategy
 
-### Claude Code Hooks (Logical Boundaries)
+**🧠 Real-Time Thinking Capture & Rich Commit Generation**
+
+Claude Code hooks automatically capture Claude's thinking process as it happens and create meaningful commits with complete context:
+
+### Claude Code Hooks (Automatic Setup)
 ```bash
 # ~/.claude/hooks/session_start.sh
 #!/bin/bash
-# Triggered when Claude session begins
-claude-git session-start --main-repo-commit="$(git rev-parse HEAD)"
+# Initializes session tracking when Claude starts working
+PROJECT_ROOT=$(pwd)
+if [ -d ".claude-git" ]; then
+    MAIN_REPO_COMMIT=$(git rev-parse HEAD)
+    python -m claude_git.cli.main session-start --main-repo-commit="$MAIN_REPO_COMMIT"
+    echo "✅ Claude session started - tracking changes to .claude-git"
+fi
 
 # ~/.claude/hooks/session_end.sh  
 #!/bin/bash
-# Triggered when Claude session ends - extract thinking text for commit message
-TRANSCRIPT_PATH="$1"  # Claude Code provides transcript path
-MAIN_REPO_COMMIT=$(git rev-parse HEAD)
-
-# Extract Claude's actual thinking text from transcript
-THINKING_TEXT=$(claude-git extract-thinking "$TRANSCRIPT_PATH")
-
-# Create meaningful commit with Claude's thought process
-claude-git session-commit \
-  --thinking="$THINKING_TEXT" \
-  --parent-commit="$MAIN_REPO_COMMIT" \
-  --transcript="$TRANSCRIPT_PATH"
+# Extracts thinking text and creates rich commit when Claude finishes
+TRANSCRIPT_PATH="$1"  # Claude Code provides transcript with thinking
+PROJECT_ROOT=$(pwd)
+if [ -d ".claude-git" ]; then
+    MAIN_REPO_COMMIT=$(git rev-parse HEAD)
+    python -m claude_git.cli.main session-end \
+      --transcript="$TRANSCRIPT_PATH" \
+      --main-repo-commit="$MAIN_REPO_COMMIT"
+    echo "✅ Session ended - commit created with thinking text and conversation history"
+fi
 ```
+
+### 🚀 What This Achieves
+- **Real-Time Capture**: Claude's thinking is captured as it thinks during the session
+- **Accumulated Changes**: All file edits are grouped into logical commits
+- **Rich Context**: Commit messages contain actual thought process, not just technical metadata  
+- **Conversation History**: Full user-Claude dialogue stored in git notes for AI conflict resolution
+- **Automatic Operation**: Zero manual intervention required
 
 ### Revolutionary: Claude's Thinking as Commit Messages
 Instead of generic commit messages, we use **Claude's actual thought process**:
@@ -283,18 +364,41 @@ Lines-Added: 47
 Lines-Modified: 12"
 ```
 
-**2. Git Notes (Query-Optimized)**
+**2. Git Notes (Query-Optimized & Conversation-Aware)**
 ```bash
-# Same data in structured format for efficient querying
+# Comprehensive structured data for efficient querying and AI conflict resolution
 git notes add -m '{
   "parent_repo": "abc123def456",
   "session_id": "session-789", 
   "files": ["auth.py", "user.py", "config.py"],
   "thinking": "Planning authentication system - need JWT middleware...",
+  "conversation": [
+    {"role": "user", "content": "Help me implement user authentication"},
+    {"role": "assistant", "content": "I will help you build a JWT-based authentication system..."},
+    {"role": "assistant", "thinking": true, "content": "Planning authentication system - need JWT middleware..."}
+  ],
   "lines_added": 47,
   "lines_modified": 12,
-  "timestamp": "2025-01-15T14:30:00Z"
+  "timestamp": "2025-01-15T14:30:00Z",
+  "tool_calls": [
+    {"tool": "Write", "file": "auth.py", "timestamp": "14:30:15"},
+    {"tool": "Edit", "file": "user.py", "timestamp": "14:30:45"}  
+  ],
+  "claude_code_transcript": "/path/to/claude/transcript.jsonl"
 }' claude-commit-hash
+```
+
+**🚀 Revolutionary: AI-Powered Conflict Resolution via Git Notes**
+
+When merge conflicts occur, claude-git can automatically resolve them using Claude Code and the stored conversation context:
+
+```bash
+# Automatic conflict resolution using conversation history
+claude-git resolve-conflicts --auto
+# → Extracts conversation from git notes
+# → Generates contextual prompt: "You were implementing auth system, user switched to OAuth..."  
+# → Runs: claude -p "$contextual_prompt" to resolve conflicts intelligently
+# → USER CHANGES ALWAYS WIN, Claude enhances compatibly
 ```
 
 **Query Strategy: Use Whatever's Fastest**

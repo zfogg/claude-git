@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -2768,118 +2769,796 @@ def _show_revert_status(claude_repo):
         console.print(f"[red]Error reading revert history: {e}[/red]")
 
 
-@main.group()
-def githooks():
-    """Manage Claude Code git hooks integration."""
+@main.group("hooks")
+def hooks():
+    """Manage hooks for claude-git integration."""
 
 
-@githooks.command("install")
-def install_hooks():
-    """Install Claude Code git hooks for automatic change tracking."""
+@hooks.group("claude")
+def claude_hooks():
+    """Manage Claude Code hooks."""
+
+
+@hooks.group("git")
+def git_hooks():
+    """Manage git repository hooks."""
+
+
+@claude_hooks.command("install")
+@click.option(
+    "--force", is_flag=True, help="Overwrite existing hooks without prompting"
+)
+def install_claude_hooks(force: bool):
+    """Install Claude Code hooks for automatic session tracking."""
+    try:
+        claude_dir = Path.home() / ".claude"
+        hooks_dir = claude_dir / "hooks"
+        settings_file = claude_dir / "settings.json"
+
+        # Create hooks directory if it doesn't exist
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+
+        # Define hook files to create
+        project_root = _find_project_root()
+        if not project_root:
+            return
+
+        project_root / "src" / "claude_git" / "hooks"
+
+        hooks_to_install = [
+            ("session_start.sh", _get_session_start_hook_content()),
+            ("session_end.sh", _get_session_end_hook_content()),
+        ]
+
+        console.print("[bold]Installing Claude Code hooks...[/bold]")
+
+        # Install hook files
+        for hook_name, hook_content in hooks_to_install:
+            hook_file = hooks_dir / hook_name
+
+            if hook_file.exists() and not force:
+                existing_content = hook_file.read_text()
+                if existing_content.strip() != hook_content.strip():
+                    if not click.confirm(
+                        f"Hook {hook_name} exists with different content. Overwrite?"
+                    ):
+                        console.print(f"[yellow]Skipped {hook_name}[/yellow]")
+                        continue
+
+            hook_file.write_text(hook_content)
+            hook_file.chmod(0o755)  # Make executable
+            console.print(f"[green]✅ Installed {hook_name}[/green]")
+
+        # Update Claude Code settings
+        _update_claude_settings(settings_file, force)
+
+        console.print(
+            "[bold green]✅ Claude Code hooks installed successfully![/bold green]"
+        )
+        console.print(
+            "[dim]Hooks will trigger automatically during Claude Code sessions[/dim]"
+        )
+
+    except Exception as e:
+        console.print(f"[red]Error installing Claude hooks: {e}[/red]")
+        raise click.Abort()
+
+
+@claude_hooks.command("uninstall")
+@click.option(
+    "--keep-settings", is_flag=True, help="Keep hook configuration in settings.json"
+)
+def uninstall_claude_hooks(keep_settings: bool):
+    """Uninstall Claude Code hooks."""
+    try:
+        claude_dir = Path.home() / ".claude"
+        hooks_dir = claude_dir / "hooks"
+        settings_file = claude_dir / "settings.json"
+
+        hooks_to_remove = ["session_start.sh", "session_end.sh"]
+
+        console.print("[bold]Uninstalling Claude Code hooks...[/bold]")
+
+        for hook_name in hooks_to_remove:
+            hook_file = hooks_dir / hook_name
+            if hook_file.exists():
+                hook_file.unlink()
+                console.print(f"[green]✅ Removed {hook_name}[/green]")
+            else:
+                console.print(f"[dim]Hook {hook_name} not found[/dim]")
+
+        if not keep_settings and settings_file.exists():
+            _remove_claude_hooks_from_settings(settings_file)
+
+        console.print("[bold green]✅ Claude Code hooks uninstalled![/bold green]")
+
+    except Exception as e:
+        console.print(f"[red]Error uninstalling Claude hooks: {e}[/red]")
+        raise click.Abort()
+
+
+@git_hooks.command("install")
+@click.option(
+    "--force", is_flag=True, help="Overwrite existing git hooks without prompting"
+)
+def install_git_hooks(force: bool):
+    """Install git hooks for automatic user change detection."""
     project_root = _find_project_root()
     if not project_root:
         return
 
-    # Check if claude-git is initialized
-    git_native_repo = GitNativeRepository(project_root)
-    if not git_native_repo.exists():
-        console.print(
-            "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
-        )
-        return
+    try:
+        git_hooks_dir = project_root / ".git" / "hooks"
+        if not git_hooks_dir.exists():
+            console.print("[red]Error: Not in a git repository[/red]")
+            return
 
-    # Path to our capture hook script
-    capture_script = Path(__file__).parent.parent / "hooks" / "capture.py"
-    if not capture_script.exists():
-        console.print(f"[red]Hook script not found: {capture_script}[/red]")
-        return
+        console.print("[bold]Installing git hooks...[/bold]")
 
-    console.print("[bold]Installing Claude Code git hooks...[/bold]")
+        # Git hooks to install
+        hooks_to_install = [
+            ("post-commit", _get_post_commit_hook_content()),
+            ("post-merge", _get_post_merge_hook_content()),
+        ]
 
-    # Instructions for manual installation
-    console.print("\n[yellow]📝 Manual Setup Required:[/yellow]")
-    console.print(
-        "To enable automatic change tracking, add this hook to your Claude Code settings:"
-    )
-    console.print("\n[bold]Hook Configuration:[/bold]")
-    console.print("Hook Type: PostToolUse")
-    console.print("Tool: Edit")
-    console.print(f'Command: python3 "{capture_script}"')
-    console.print(f"Working Directory: {project_root}")
+        for hook_name, hook_content in hooks_to_install:
+            hook_file = git_hooks_dir / hook_name
 
-    console.print("\n[bold]Claude Code Settings Location:[/bold]")
-    claude_settings_dir = Path.home() / ".claude"
-    console.print(f"Add this to your settings file in: {claude_settings_dir}")
+            if hook_file.exists() and not force:
+                existing_content = hook_file.read_text()
+                if "claude-git" not in existing_content:
+                    if not click.confirm(
+                        f"Git hook {hook_name} exists. Add claude-git integration?"
+                    ):
+                        console.print(f"[yellow]Skipped {hook_name}[/yellow]")
+                        continue
+                    # Append to existing hook
+                    hook_content = existing_content + "\n\n" + hook_content
+                elif existing_content.strip() != hook_content.strip():
+                    if not click.confirm(
+                        f"Git hook {hook_name} exists with different claude-git content. Overwrite?"
+                    ):
+                        console.print(f"[yellow]Skipped {hook_name}[/yellow]")
+                        continue
 
-    console.print("\n[green]✅ Hook script is ready for installation[/green]")
-    console.print(
-        "[dim]Note: Automatic hook installation will be available in a future update[/dim]"
-    )
+            hook_file.write_text(hook_content)
+            hook_file.chmod(0o755)  # Make executable
+            console.print(f"[green]✅ Installed {hook_name}[/green]")
 
+        console.print("[bold green]✅ Git hooks installed successfully![/bold green]")
+        console.print("[dim]Git hooks will detect user changes automatically[/dim]")
 
-@githooks.command("remove")
-def remove_hooks():
-    """Remove Claude Code git hooks."""
-    console.print("[bold]Removing Claude Code git hooks...[/bold]")
-
-    console.print("\n[yellow]📝 Manual Removal Required:[/yellow]")
-    console.print(
-        "To disable automatic change tracking, remove the claude-git hook from your Claude Code settings:"
-    )
-    console.print("\n[bold]Steps:[/bold]")
-    console.print("1. Open your Claude Code settings")
-    console.print("2. Find the PostToolUse:Edit hook for claude-git")
-    console.print("3. Delete or disable the hook configuration")
-
-    console.print("\n[green]✅ Instructions provided for hook removal[/green]")
-    console.print(
-        "[dim]Note: Automatic hook removal will be available in a future update[/dim]"
-    )
+    except Exception as e:
+        console.print(f"[red]Error installing git hooks: {e}[/red]")
+        raise click.Abort()
 
 
-@githooks.command("status")
-def hooks_status():
-    """Show the status of Claude Code git hooks."""
+@git_hooks.command("uninstall")
+def uninstall_git_hooks():
+    """Uninstall claude-git integration from git hooks."""
     project_root = _find_project_root()
     if not project_root:
         return
 
-    # Check if claude-git is initialized
-    git_native_repo = GitNativeRepository(project_root)
-    if not git_native_repo.exists():
-        console.print(
-            "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
-        )
+    try:
+        git_hooks_dir = project_root / ".git" / "hooks"
+        if not git_hooks_dir.exists():
+            console.print("[red]Error: Not in a git repository[/red]")
+            return
+
+        console.print("[bold]Uninstalling git hooks...[/bold]")
+
+        hooks_to_clean = ["post-commit", "post-merge"]
+
+        for hook_name in hooks_to_clean:
+            hook_file = git_hooks_dir / hook_name
+            if hook_file.exists():
+                content = hook_file.read_text()
+                if "claude-git" in content:
+                    # Remove claude-git sections
+                    lines = content.split("\n")
+                    filtered_lines = []
+                    skip_claude_git = False
+
+                    for line in lines:
+                        if "# Claude-git integration" in line:
+                            skip_claude_git = True
+                            continue
+                        if skip_claude_git and (
+                            line.strip() == "" or line.startswith("#")
+                        ):
+                            continue
+                        if skip_claude_git and not line.startswith(" "):
+                            skip_claude_git = False
+
+                        if not skip_claude_git:
+                            filtered_lines.append(line)
+
+                    new_content = "\n".join(filtered_lines).strip()
+
+                    if new_content:
+                        hook_file.write_text(new_content)
+                        console.print(
+                            f"[green]✅ Cleaned claude-git from {hook_name}[/green]"
+                        )
+                    else:
+                        hook_file.unlink()
+                        console.print(f"[green]✅ Removed empty {hook_name}[/green]")
+                else:
+                    console.print(
+                        f"[dim]No claude-git integration found in {hook_name}[/dim]"
+                    )
+            else:
+                console.print(f"[dim]Git hook {hook_name} not found[/dim]")
+
+        console.print("[bold green]✅ Git hooks cleaned![/bold green]")
+
+    except Exception as e:
+        console.print(f"[red]Error uninstalling git hooks: {e}[/red]")
+        raise click.Abort()
+
+
+def _get_session_start_hook_content() -> str:
+    """Get the content for session_start.sh hook."""
+    return """#!/bin/bash
+# Claude Code Session Start Hook - Initialize claude-git session
+# Called when Claude Code session starts
+
+PROJECT_ROOT=$(pwd)
+
+# Check if this is a claude-git project
+if [ ! -d ".claude-git" ]; then
+    # Not a claude-git project, skip silently
+    exit 0
+fi
+
+echo "🚀 Starting Claude Code session - initializing claude-git tracking..."
+
+# Get current main repo commit for session context
+MAIN_REPO_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+SESSION_ID="session-$(echo $MAIN_REPO_COMMIT | cut -c1-7)"
+
+echo "📋 Session ID: $SESSION_ID"
+echo "📍 Main repo commit: $MAIN_REPO_COMMIT"
+
+# Initialize session in claude-git
+cd "$PROJECT_ROOT"
+python -m claude_git.cli.main session-start \\
+  --session-id="$SESSION_ID" \\
+  --main-repo-commit="$MAIN_REPO_COMMIT" \\
+  2>/dev/null || echo "⚠️  Warning: claude-git session-start failed"
+
+echo "✅ Claude session initialized"
+"""
+
+
+def _get_session_end_hook_content() -> str:
+    """Get the content for session_end.sh hook."""
+    return """#!/bin/bash
+# Claude Code Session End Hook - Create commit with thinking text and changes
+# Called when Claude Code session ends
+# $1 = path to transcript file (provided by Claude Code)
+
+TRANSCRIPT_PATH="$1"
+PROJECT_ROOT=$(pwd)
+
+# Check if this is a claude-git project
+if [ ! -d ".claude-git" ]; then
+    # Not a claude-git project, skip silently
+    exit 0
+fi
+
+echo "🔄 Ending Claude Code session - creating commit with thinking text..."
+
+# Get current main repo commit
+MAIN_REPO_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+
+# Create session commit with thinking text extracted from transcript
+cd "$PROJECT_ROOT"
+
+if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+    echo "📋 Extracting thinking text from transcript: $TRANSCRIPT_PATH"
+
+    # Use python module to create session commit with thinking extraction
+    python -m claude_git.cli.main session-end \\
+      --transcript="$TRANSCRIPT_PATH" \\
+      --main-repo-commit="$MAIN_REPO_COMMIT" \\
+      2>/dev/null || {
+        echo "⚠️  Warning: claude-git session-end failed, creating basic commit..."
+
+        # Fallback: create basic commit without thinking extraction
+        python -m claude_git.cli.main session-end \\
+          --main-repo-commit="$MAIN_REPO_COMMIT" \\
+          2>/dev/null || echo "❌ Could not create session commit"
+    }
+else
+    echo "⚠️  No transcript provided, creating basic session commit..."
+    python -m claude_git.cli.main session-end \\
+      --main-repo-commit="$MAIN_REPO_COMMIT" \\
+      2>/dev/null || echo "❌ Could not create session commit"
+fi
+
+echo "✅ Claude session ended - changes committed to .claude-git"
+"""
+
+
+def _get_post_commit_hook_content() -> str:
+    """Get the content for post-commit git hook."""
+    return """# Claude-git integration - detect user commits
+if [ -d ".claude-git" ]; then
+    echo "📝 User commit detected - syncing to claude-git..."
+    python -m claude_git.cli.main sync-user-changes 2>/dev/null || true
+fi
+"""
+
+
+def _get_post_merge_hook_content() -> str:
+    """Get the content for post-merge git hook."""
+    return """# Claude-git integration - detect user merges
+if [ -d ".claude-git" ]; then
+    echo "🔀 User merge detected - syncing to claude-git..."
+    python -m claude_git.cli.main sync-user-changes 2>/dev/null || true
+fi
+"""
+
+
+def _update_claude_settings(settings_file: Path, force: bool) -> None:
+    """Update Claude Code settings to include hook configuration."""
+    import json
+
+    settings = {}
+    if settings_file.exists():
+        settings = json.loads(settings_file.read_text())
+
+    hooks_config = {
+        "SessionStart": [
+            {
+                "matcher": ".*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": str(
+                            Path.home() / ".claude" / "hooks" / "session_start.sh"
+                        ),
+                    }
+                ],
+            }
+        ],
+        "SessionEnd": [
+            {
+                "matcher": ".*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": str(
+                            Path.home() / ".claude" / "hooks" / "session_end.sh"
+                        ),
+                    }
+                ],
+            }
+        ],
+        "Stop": [
+            {
+                "matcher": ".*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": str(
+                            Path.home() / ".claude" / "hooks" / "session_end.sh"
+                        ),
+                    }
+                ],
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "(Edit|Write|MultiEdit)",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f'python3 "{_find_project_root() / "src" / "claude_git" / "hooks" / "capture.py"}"',
+                    }
+                ],
+            }
+        ],
+    }
+
+    # Update hooks configuration
+    if "hooks" not in settings:
+        settings["hooks"] = {}
+
+    for hook_type, hook_config in hooks_config.items():
+        if hook_type in settings["hooks"]:
+            # Hook type already exists - ADD to existing hooks instead of replacing
+            existing_hooks = settings["hooks"][hook_type]
+
+            # Extract the command from our new hook config
+            new_hook_command = hook_config[0]["hooks"][0]["command"]
+
+            # Check if our hook is already installed by searching ALL hooks at ANY index
+            already_installed = False
+            for hook_config_item in existing_hooks:
+                for hook in hook_config_item.get("hooks", []):
+                    if hook.get("command") == new_hook_command:
+                        already_installed = True
+                        break
+                if already_installed:
+                    break
+
+            if not already_installed:
+                if not force and not click.confirm(
+                    f"Add claude-git hook to existing {hook_type} hooks?"
+                ):
+                    console.print(f"[yellow]⚠️ Skipped {hook_type} hook[/yellow]")
+                    continue
+                # Add our hook to the existing hooks
+                existing_hooks.extend(hook_config)
+                console.print(
+                    f"[green]✅ Added claude-git hook to existing {hook_type} hooks[/green]"
+                )
+            else:
+                console.print(
+                    f"[yellow]⚠️ Claude-git {hook_type} hook already installed[/yellow]"
+                )
+        else:
+            # Hook type doesn't exist - create it
+            settings["hooks"][hook_type] = hook_config
+            console.print(f"[green]✅ Added {hook_type} hook configuration[/green]")
+
+    # Write updated settings
+    settings_file.write_text(json.dumps(settings, indent=2))
+    console.print("[green]✅ Updated Claude Code settings[/green]")
+
+
+def _remove_claude_hooks_from_settings(settings_file: Path) -> None:
+    """Remove claude-git hooks from Claude Code settings."""
+    import json
+
+    if not settings_file.exists():
         return
 
-    # Path to our capture hook script
-    capture_script = Path(__file__).parent.parent / "hooks" / "capture.py"
+    settings = json.loads(settings_file.read_text())
 
-    console.print("[bold]Claude Code Git Hooks Status[/bold]")
-    console.print(f"Project Root: {project_root}")
-    console.print(f"Hook Script: {capture_script}")
-    console.print(f"Script Exists: {'✅ Yes' if capture_script.exists() else '❌ No'}")
+    if "hooks" in settings:
+        hooks_to_remove = ["SessionStart", "SessionEnd", "PostToolUse"]
+        for hook_type in hooks_to_remove:
+            if hook_type in settings["hooks"]:
+                del settings["hooks"][hook_type]
+                console.print(f"[green]✅ Removed {hook_type} from settings[/green]")
 
-    # Check if there's evidence of hook activity (debug log)
-    debug_log = Path.home() / ".claude" / "claude-git-debug.log"
-    if debug_log.exists():
-        console.print(f"Debug Log: ✅ Found ({debug_log})")
-        # Show last few lines if small enough
-        try:
-            if debug_log.stat().st_size < 10000:  # Less than 10KB
-                with open(debug_log) as f:
-                    lines = f.readlines()
-                    if lines:
-                        console.print("\n[dim]Recent hook activity:[/dim]")
-                        for line in lines[-3:]:  # Show last 3 lines
-                            console.print(f"  {line.strip()}")
-        except Exception:
-            pass
-    else:
-        console.print("Debug Log: ❌ Not found")
+    settings_file.write_text(json.dumps(settings, indent=2))
+    console.print("[green]✅ Cleaned Claude Code settings[/green]")
+
+
+@main.command("sync-user-changes")
+def sync_user_changes():
+    """Sync user changes from main repo to claude-git repo (called by git hooks)."""
+    project_root = _find_project_root()
+    if not project_root:
+        return
+
+    git_native_repo = get_git_native_repo_or_exit(project_root)
+
+    try:
+        # Get the latest main repo commit
+        main_commit = git_native_repo._get_main_repo_commit()
         console.print(
-            "[yellow]Tip: Hook activity creates a debug log at ~/.claude/claude-git-debug.log[/yellow]"
+            f"[green]📁 Syncing user changes from commit: {main_commit[:8]}[/green]"
         )
+
+        # Perform initial file sync to copy all files from main repo
+        git_native_repo._initial_file_sync()
+        console.print("[green]✅ User changes synced to claude-git[/green]")
+
+    except Exception as e:
+        console.print(f"[red]⚠️  Failed to sync user changes: {e}[/red]")
+
+
+@main.command("session-start")
+@click.option("--session-id", type=str, help="Unique session identifier")
+@click.option(
+    "--main-repo-commit",
+    type=str,
+    required=True,
+    help="Current commit hash of main repository",
+)
+def session_start(session_id: Optional[str], main_repo_commit: str):
+    """Initialize a Claude Code session for change tracking."""
+    project_root = _find_project_root()
+    if not project_root:
+        return
+
+    git_native_repo = get_git_native_repo_or_exit(project_root)
+
+    if not session_id:
+        session_id = f"session-{main_repo_commit[:7]}"
+
+    console.print(f"[green]🚀 Starting Claude session: {session_id}[/green]")
+    console.print(f"[dim]Main repo commit: {main_repo_commit}[/dim]")
+    console.print(f"[dim]Project: {project_root}[/dim]")
+
+    # Initialize session tracking (this just acknowledges the session start)
+    # The actual accumulation happens via PostToolUse hooks
+    git_native_repo._session_active = True
+    console.print("[green]✅ Claude session tracking initialized[/green]")
+
+
+@main.command("session-end")
+@click.option(
+    "--transcript",
+    type=click.Path(exists=True),
+    help="Path to Claude Code transcript file",
+)
+@click.option(
+    "--main-repo-commit",
+    type=str,
+    required=True,
+    help="Current commit hash of main repository",
+)
+def session_end(transcript: Optional[str], main_repo_commit: str):
+    """Create commit with thinking text extracted from transcript."""
+    project_root = _find_project_root()
+    if not project_root:
+        return
+
+    git_native_repo = get_git_native_repo_or_exit(project_root)
+
+    try:
+        session_id = f"session-{main_repo_commit[:7]}"
+        console.print(f"[green]✅ Ending Claude session: {session_id}[/green]")
+
+        # Extract thinking text from transcript if provided
+        thinking_text = ""
+        conversation_history = []
+
+        if transcript:
+            console.print(f"[dim]Extracting thinking from: {transcript}[/dim]")
+            thinking_text, conversation_history = _extract_thinking_from_transcript(
+                transcript
+            )
+
+        # Accumulate current changes if not already in session
+        if not git_native_repo._session_active:
+            git_native_repo.session_start(session_id=session_id, use_branching=False)
+
+            # Detect and accumulate recent file changes
+            _accumulate_recent_changes(git_native_repo, main_repo_commit)
+
+        # Create actual session commit with conversation history
+        commit_hash = git_native_repo.session_end(thinking_text=thinking_text)
+
+        if commit_hash and conversation_history:
+            # Add conversation history to git notes
+            _add_conversation_to_git_notes(
+                git_native_repo.claude_git_dir,
+                commit_hash,
+                conversation_history,
+                main_repo_commit,
+                session_id,
+            )
+            console.print(
+                f"[green]✅ Session commit created: {commit_hash[:8]} (with conversation history)[/green]"
+            )
+        elif commit_hash:
+            console.print(
+                f"[green]✅ Session commit created: {commit_hash[:8]}[/green]"
+            )
+        else:
+            console.print("[yellow]⚠️  No changes to commit[/yellow]")
+
+    except Exception as e:
+        console.print(f"[red]Error ending session: {e}[/red]")
+        raise click.Abort() from e
+
+
+def _extract_thinking_from_transcript(transcript_path: str) -> tuple[str, list]:
+    """Extract Claude's thinking text and conversation from transcript file."""
+    thinking_messages = []
+    conversation = []
+
+    try:
+        with open(transcript_path) as f:
+            for line in f:
+                if line.strip():
+                    data = json.loads(line)
+
+                    # Extract conversation
+                    if data.get("type") == "message":
+                        role = data.get("role")
+                        content_items = data.get("content", [])
+
+                        for item in content_items:
+                            if item.get("type") == "text":
+                                text_content = item.get("text", "")
+                                is_thinking = data.get("thinking", False)
+
+                                conversation.append(
+                                    {
+                                        "role": role,
+                                        "content": text_content,
+                                        "thinking": is_thinking,
+                                    }
+                                )
+
+                                # Extract thinking specifically
+                                if is_thinking and role == "assistant":
+                                    thinking_messages.append(text_content)
+
+    except Exception as e:
+        print(f"Error parsing transcript: {e}")
+        return "", []
+
+    # Process thinking messages into commit-friendly text
+    thinking_text = _process_thinking_messages(thinking_messages)
+    return thinking_text, conversation
+
+
+def _add_conversation_to_git_notes(
+    claude_git_dir: Path,
+    commit_hash: str,
+    conversation: list,
+    main_repo_commit: str,
+    session_id: str,
+) -> None:
+    """Add full conversation history to git notes for the commit."""
+    try:
+        # Format conversation for human readability
+        formatted_conversation = _format_conversation_for_display(conversation)
+
+        # Create structured git notes content
+        notes_content = f"""=== CLAUDE SESSION SUMMARY ===
+Session: {session_id}
+Main-Repo: {main_repo_commit}
+Timestamp: {datetime.now().isoformat()}
+
+{formatted_conversation}
+
+=== END CONVERSATION ==="""
+
+        # Add to git notes
+        result = subprocess.run(
+            ["git", "notes", "add", "-m", notes_content, commit_hash],
+            cwd=claude_git_dir,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            print(
+                f"✅ Added conversation history to git notes ({len(conversation)} messages)"
+            )
+        else:
+            print(f"⚠️  Warning: Failed to add git notes: {result.stderr}")
+
+    except Exception as e:
+        print(f"❌ Error adding conversation to git notes: {e}")
+
+
+def _accumulate_recent_changes(git_native_repo, main_repo_commit: str) -> None:
+    """Only accumulate changes that Claude made via explicit tool use."""
+    print("📝 Session-end only processes tool use changes (no auto-generated files)")
+
+    # During session end, we should only commit changes that were explicitly
+    # accumulated via tool use (Write, Edit, MultiEdit, Delete).
+    # The _accumulated_changes list already contains only these explicit changes.
+
+    # If no session was active, we don't try to detect/accumulate anything
+    # because we only want to track explicit Claude tool use
+    if len(git_native_repo._accumulated_changes) == 0:
+        print("ℹ️  No tool use changes to accumulate")
+        return
+
+    print(f"📝 Using {len(git_native_repo._accumulated_changes)} changes from tool use")
+
+    # Handle any file deletions that might have happened
+    _handle_deleted_files(git_native_repo)
+
+
+def _handle_deleted_files(git_native_repo) -> None:
+    """Handle files that were deleted by Claude and should be removed from claude-git repo."""
+    try:
+        # Check if any previously tracked files are now missing
+        result = subprocess.run(
+            ["git", "ls-files"],
+            capture_output=True,
+            text=True,
+            cwd=str(git_native_repo.project_root),
+        )
+
+        if result.returncode != 0:
+            return
+
+        # Check each tracked file to see if it still exists
+        for tracked_file in result.stdout.strip().split("\n"):
+            if not tracked_file.strip():
+                continue
+
+            file_path = git_native_repo.project_root / tracked_file
+            claude_file_path = git_native_repo.claude_git_dir / tracked_file
+
+            # If file was deleted from main repo but still exists in claude-git
+            if not file_path.exists() and claude_file_path.exists():
+                print(f"🗑️  Removing deleted file from claude-git: {tracked_file}")
+
+                # Remove from claude-git repo
+                try:
+                    git_native_repo.claude_repo.index.remove([tracked_file])
+
+                    # Accumulate the deletion
+                    git_native_repo.accumulate_change(
+                        file_path=tracked_file,
+                        tool_name="Delete",
+                        tool_input={"file_path": tracked_file, "deleted": True},
+                    )
+                except Exception as e:
+                    print(f"⚠️  Could not remove {tracked_file}: {e}")
+
+    except Exception as e:
+        print(f"⚠️  Error handling deleted files: {e}")
+
+
+def _format_conversation_for_display(conversation: list) -> str:
+    """Format conversation history in a readable way for git notes display."""
+    if not conversation:
+        return "No conversation history available"
+
+    formatted_lines = []
+    formatted_lines.append("=== CONVERSATION HISTORY ===")
+    formatted_lines.append("")
+
+    for i, message in enumerate(conversation, 1):
+        role = message.get("role", "unknown")
+        content = message.get("content", "")
+
+        # Create readable role prefix
+        if role == "user":
+            prefix = f"[{i}] 👤 USER:"
+        elif role == "assistant":
+            if message.get("thinking", False):
+                prefix = f"[{i}] 🧠 CLAUDE (thinking):"
+            else:
+                prefix = f"[{i}] 🤖 CLAUDE:"
+        else:
+            prefix = f"[{i}] {role.upper()}:"
+
+        formatted_lines.append(prefix)
+        formatted_lines.append("")
+
+        # Add content with proper indentation
+        if content:
+            content_lines = content.strip().split("\n")
+            for line in content_lines:
+                if line.strip():
+                    formatted_lines.append(f"    {line}")
+                else:
+                    formatted_lines.append("")
+
+        formatted_lines.append("")
+
+    return "\n".join(formatted_lines)
+
+
+def _process_thinking_messages(thinking_messages: list) -> str:
+    """Process thinking messages into readable commit message text."""
+    if not thinking_messages:
+        return "Claude session work"
+
+    # Remove duplicates while preserving order
+    unique_thoughts = []
+    seen = set()
+    for thought in thinking_messages:
+        if (
+            thought not in seen and len(thought.strip()) > 10
+        ):  # Filter out very short thoughts
+            unique_thoughts.append(thought.strip())
+            seen.add(thought)
+
+    # Join with proper formatting for git commit message
+    if unique_thoughts:
+        # Limit to prevent extremely long commit messages
+        selected_thoughts = unique_thoughts[:3]  # Top 3 most important thoughts
+        return "\n\n".join(selected_thoughts)
+    return "Claude session work (thinking text filtered)"
 
 
 def _find_project_root() -> Optional[Path]:

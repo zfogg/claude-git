@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Optional
 import git
 from git import Repo
 
+# Import test integration for real-time feedback
+from claude_git.core.test_integration import CrossSessionTestCoordinator, TestMonitor
+
 
 class GitNativeRepository:
     """Git-native dual repository management for claude-git.
@@ -37,6 +40,11 @@ class GitNativeRepository:
         self.sessions_metadata_file = self.claude_git_dir / ".claude-sessions.json"
         self._current_session_branch: Optional[str] = None
         self._current_worktree_path: Optional[Path] = None
+
+        # Real-time test integration
+        self._test_monitor: Optional[TestMonitor] = None
+        self._test_coordinator = CrossSessionTestCoordinator(self.claude_git_dir)
+        self._enable_test_monitoring = self._should_enable_test_monitoring()
 
     @property
     def claude_repo(self) -> Repo:
@@ -217,15 +225,29 @@ class GitNativeRepository:
         self._current_session_id = session_id
         self._accumulated_changes = []
 
+        # Start real-time test monitoring if enabled
+        if self._enable_test_monitoring:
+            worktree_path = self._current_worktree_path or self.claude_git_dir
+            self._test_monitor = TestMonitor(
+                session_id=session_id,
+                worktree_path=worktree_path,
+                project_root=self.project_root,
+            )
+
+            if self._test_monitor.start_monitoring():
+                # Register with cross-session coordinator
+                self._test_coordinator.register_session_monitor(
+                    session_id, self._test_monitor
+                )
+                print(f"🧪 Real-time test monitoring started for session {session_id}")
+            else:
+                print(f"⚠️  Failed to start test monitoring for session {session_id}")
+                self._test_monitor = None
+
     def accumulate_change(
         self, file_path: str, tool_name: str, tool_input: Dict[str, Any]
     ) -> None:
-        """Accumulate a change during active Claude session."""
-        if not self._session_active:
-            print("⚠️  No active session - creating immediate commit")
-            self._create_immediate_commit(file_path, tool_name, tool_input)
-            return
-
+        """Accumulate a change during Claude session - no immediate commits."""
         print(f"📝 Accumulating change: {tool_name} on {file_path}")
 
         # Store change information
@@ -238,6 +260,12 @@ class GitNativeRepository:
         }
 
         self._accumulated_changes.append(change_info)
+
+        # Trigger test run for the changed file if monitoring is active
+        if self._test_monitor and tool_name in ["Write", "Edit", "MultiEdit"]:
+            # Run tests affected by this file change
+            changed_files = [file_path]
+            self._test_monitor.run_affected_tests(changed_files)
 
         # Sync the specific file from main repo to claude-git repo
         self._sync_file_to_claude_repo(file_path)
@@ -252,6 +280,10 @@ class GitNativeRepository:
 
         if not self._accumulated_changes:
             print("ℹ️  No changes to commit")
+
+            # Stop test monitoring if active
+            self._cleanup_test_monitoring()
+
             self._session_active = False
             self._current_session_id = None
             return ""
@@ -316,6 +348,9 @@ class GitNativeRepository:
                     self._add_git_notes(latest_commit.hexsha)
                 else:
                     print("⚠️  Session branch requires manual merge")
+
+            # Stop test monitoring if active
+            self._cleanup_test_monitoring()
 
             # Reset session state
             self._session_active = False
@@ -1208,3 +1243,60 @@ Time: {datetime.now().isoformat()}
         except Exception as e:
             print(f"⚠️  Error listing session branches: {e}")
             return branches
+
+    def _should_enable_test_monitoring(self) -> bool:
+        """Determine if real-time test monitoring should be enabled for this project."""
+        # Check for Python test frameworks and test files
+        test_indicators = [
+            # pytest configuration
+            self.project_root / "pytest.ini",
+            self.project_root / "pyproject.toml",  # May have pytest config
+            self.project_root / "setup.cfg",  # May have pytest config
+            # Test directories
+            self.project_root / "tests",
+            self.project_root / "test",
+        ]
+
+        # Check for test files in common patterns
+        test_file_patterns = ["test_*.py", "*_test.py", "tests/*.py"]
+
+        # If any test indicators exist, enable monitoring
+        if any(indicator.exists() for indicator in test_indicators):
+            print("🧪 Test monitoring enabled: Found test configuration/directories")
+            return True
+
+        # Check for test files using glob patterns
+        for pattern in test_file_patterns:
+            if any(self.project_root.glob(pattern)):
+                print(f"🧪 Test monitoring enabled: Found test files ({pattern})")
+                return True
+
+        print("ℹ️  Test monitoring disabled: No test configuration detected")
+        return False
+
+    def _cleanup_test_monitoring(self) -> None:
+        """Stop and clean up test monitoring for the current session."""
+        if self._test_monitor:
+            # Get session summary before stopping
+            session_summary = self._test_monitor.get_session_test_summary()
+
+            # Stop monitoring
+            self._test_monitor.stop_monitoring()
+
+            # Unregister from coordinator
+            if self._current_session_id:
+                self._test_coordinator.unregister_session_monitor(
+                    self._current_session_id
+                )
+
+            # Report final test status
+            if session_summary["total_test_runs"] > 0:
+                status = "✅" if session_summary["overall_success"] else "❌"
+                print(
+                    f"{status} Session test summary: {session_summary['successful_runs']}/{session_summary['total_test_runs']} test runs successful"
+                )
+                print(
+                    f"   Latest: {session_summary['latest_passed']} passed, {session_summary['latest_failed']} failed"
+                )
+
+            self._test_monitor = None
