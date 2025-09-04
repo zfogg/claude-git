@@ -56,32 +56,44 @@ def parse_hook_input(hook_input: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-def sync_file_to_claude_repo(
-    file_path: Path, project_root: Path, claude_git_dir: Path, debug_log: Path
+def auto_commit_file_change(
+    file_path: Path,
+    project_root: Path,
+    claude_git_dir: Path,
+    debug_log: Path,
+    tool_name: str = "FileChange",
 ) -> bool:
-    """Sync a changed file from main repo to claude-git repo."""
+    """Auto-commit a file change to the claude-git fork."""
     try:
-        # Get relative path from project root
+        from claude_git.core.git_native_repository import GitNativeRepository
+
+        # Get relative path for commit message
         relative_path = file_path.relative_to(project_root)
-        claude_git_file = claude_git_dir / relative_path
 
-        # Create parent directories if needed
-        claude_git_file.parent.mkdir(parents=True, exist_ok=True)
+        # Initialize git repo manager
+        git_repo = GitNativeRepository(project_root)
 
-        # Copy file content from main repo to claude-git repo
+        # Check if file exists or was deleted
         if file_path.exists():
-            import shutil
-
-            shutil.copy2(file_path, claude_git_file)
+            action = "modify"
         else:
-            # File was deleted, remove from claude-git too
-            if claude_git_file.exists():
-                claude_git_file.unlink()
+            action = "delete"
 
+        # Create auto-commit message
+        message = f"{tool_name}: {action} {relative_path}"
+
+        # Auto-commit the change (files are already in the fork from git clone)
+        commit_hash = git_repo.auto_commit_change(message, [str(relative_path)])
+
+        with open(debug_log, "a") as f:
+            f.write(
+                f"✅ Auto-committed {action} of {relative_path} -> {commit_hash[:8]}\n"
+            )
         return True
+
     except Exception as e:
         with open(debug_log, "a") as f:
-            f.write(f"Error syncing file {file_path}: {e}\n")
+            f.write(f"❌ Error auto-committing {file_path}: {e}\n")
         return False
 
 

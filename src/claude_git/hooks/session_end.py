@@ -36,11 +36,9 @@ def extract_chronological_thinking_and_changes(
                     content = entry["message"].get("content", [])
                     if isinstance(content, list):
                         for item in content:
-                            # Extract thinking text
-                            if item.get("type") == "text" and item.get(
-                                "thinking", False
-                            ):
-                                thinking_text = item.get("text", "").strip()
+                            # Extract thinking text (Claude Code format)
+                            if item.get("type") == "thinking":
+                                thinking_text = item.get("thinking", "").strip()
                                 if thinking_text:
                                     chronological_events.append(
                                         {

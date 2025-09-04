@@ -20,7 +20,6 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from claude_git.core.git_native_repository import GitNativeRepository
-from claude_git.core.repository import ClaudeGitRepository
 
 console = Console()
 
@@ -131,26 +130,30 @@ def status():
             pass
         return
 
-    # Fall back to legacy architecture
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    # Use fork-based architecture
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
         return
 
-    sessions = claude_repo.list_sessions()
-    active_sessions = [s for s in sessions if s.is_active]
+    sessions = git_native_repo.list_sessions()
+    active_sessions = [s for s in sessions if s.get("is_active", False)]
 
     console.print(f"[bold]Project:[/bold] {project_root}")
-    console.print("[bold]Architecture:[/bold] Legacy")
+    console.print("[bold]Architecture:[/bold] Fork-based")
     console.print(f"[bold]Total sessions:[/bold] {len(sessions)}")
     console.print(f"[bold]Active sessions:[/bold] {len(active_sessions)}")
 
     if active_sessions:
         for session in active_sessions[:3]:  # Show up to 3 active sessions
-            commits = claude_repo.get_commits_for_session(session.id)
-            console.print(f"  • {session.branch_name} ({len(commits)} commits)")
+            commits = git_native_repo.get_commits_for_session(
+                session.get("session_id", "")
+            )
+            console.print(
+                f"  • {session.get('branch_name', 'unknown')} ({len(commits)} commits)"
+            )
 
 
 @main.command()
@@ -185,9 +188,9 @@ def log(limit: int, oneline: bool):
             console.print(f"[red]Error: {e}[/red]")
             return
 
-    # Fall back to legacy architecture
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    # Use fork-based architecture
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -199,7 +202,7 @@ def log(limit: int, oneline: bool):
             args.append("--oneline")
 
         # Use pager-aware command for log output
-        claude_repo.run_git_command_with_pager(args)
+        git_native_repo.run_git_command_with_pager(args)
     except RuntimeError as e:
         console.print(f"[red]{e}[/red]")
 
@@ -289,9 +292,9 @@ def diff(
             console.print(f"[red]Error: {e}[/red]")
             return
 
-    # Fall back to legacy architecture
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    # Use fork-based architecture
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -303,23 +306,23 @@ def diff(
 
         # Handle different diff modes
         if no_index:
-            _handle_no_index_diff(claude_repo, parsed_args, verbose, tool, no_pager)
+            _handle_no_index_diff(git_native_repo, parsed_args, verbose, tool, no_pager)
             return
 
         if parsed_args.get("commit_range"):
             _handle_commit_range_diff(
-                claude_repo, parsed_args, parent_hash, verbose, tool, no_pager
+                git_native_repo, parsed_args, parent_hash, verbose, tool, no_pager
             )
             return
 
         if parsed_args.get("single_commit"):
             _handle_single_commit_diff(
-                claude_repo, parsed_args, parent_hash, verbose, tool, no_pager
+                git_native_repo, parsed_args, parent_hash, verbose, tool, no_pager
             )
             return
 
         # Default behavior - show recent changes like git diff
-        diff_results = claude_repo.get_meaningful_diff(
+        diff_results = git_native_repo.get_meaningful_diff(
             limit, parent_hash=parent_hash, paths=parsed_args.get("paths")
         )
 
@@ -348,14 +351,14 @@ def sessions():
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
         return
 
-    sessions = claude_repo.list_sessions()
+    sessions = git_native_repo.list_sessions()
 
     if not sessions:
         console.print("[yellow]No sessions found[/yellow]")
@@ -370,20 +373,20 @@ def sessions():
     table.add_column("Status", style="red")
 
     for session in sessions:
-        session_id_short = session.id[:8]
-        branch_name = session.branch_name
-        start_time = session.start_time.strftime("%Y-%m-%d %H:%M")
+        session_id_short = session.get("session_id", "")[:8]
+        branch_name = session.get("branch_name", "unknown")
+        start_time = session.get("start_time", "unknown").strftime("%Y-%m-%d %H:%M")
 
-        if session.is_active:
+        if session.get("is_active", False):
             duration = "Active"
             status = "🟢 Active"
         else:
-            duration_sec = session.duration
+            duration_sec = session.get("duration", "unknown")
             duration = f"{duration_sec / 60:.0f}m" if duration_sec else "Unknown"
             status = "⚫ Ended"
 
         # Get change count from session's tracked commit IDs
-        change_count = str(len(session.change_ids))
+        change_count = str(len(session.get("change_ids", [])))
 
         table.add_row(
             session_id_short, branch_name, start_time, duration, change_count, status
@@ -400,8 +403,8 @@ def git(git_args):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -416,10 +419,10 @@ def git(git_args):
 
         if args and args[0] in pager_commands:
             # Use pager-aware command for output that benefits from paging
-            claude_repo.run_git_command_with_pager(args)
+            git_native_repo.run_git_command_with_pager(args)
         else:
             # Use regular command for simple output
-            result = claude_repo.run_git_command(args)
+            result = git_native_repo.run_git_command(args)
             if result:
                 console.print(result)
     except RuntimeError as e:
@@ -434,8 +437,8 @@ def show(commit_hash: Optional[str]):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -448,12 +451,12 @@ def show(commit_hash: Optional[str]):
             args.append(commit_hash)
 
         # Use pager-aware command for show output
-        claude_repo.run_git_command_with_pager(args)
+        git_native_repo.run_git_command_with_pager(args)
 
         # Also show parent repo hash if available
         if commit_hash:
             try:
-                commit = claude_repo.repo.commit(commit_hash)
+                commit = git_native_repo.repo.commit(commit_hash)
                 json_files = [
                     f for f in commit.tree.traverse() if f.name.endswith(".json")
                 ]
@@ -497,8 +500,8 @@ def apply(commit_hash: str, dry_run: bool):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -506,7 +509,7 @@ def apply(commit_hash: str, dry_run: bool):
 
     try:
         # Get the patch file for this commit
-        commit = claude_repo.repo.commit(commit_hash)
+        commit = git_native_repo.repo.commit(commit_hash)
         console.print(
             f"[bold]Applying commit:[/bold] {commit.hexsha[:8]} - {commit.message.split()[0]}"
         )
@@ -542,8 +545,8 @@ def rollback(commit_hash: str):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -551,7 +554,7 @@ def rollback(commit_hash: str):
 
     try:
         # Get the commit and create reverse patch
-        commit = claude_repo.repo.commit(commit_hash)
+        commit = git_native_repo.repo.commit(commit_hash)
         console.print(
             f"[bold]Creating rollback for:[/bold] {commit.hexsha[:8]} - {commit.message.split()[0]}"
         )
@@ -607,8 +610,8 @@ def revert(commit_ref: str, dry_run: bool, interactive: bool, status: bool):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -616,7 +619,7 @@ def revert(commit_ref: str, dry_run: bool, interactive: bool, status: bool):
 
     # Handle status flag - show revert history
     if status:
-        _show_revert_status(claude_repo)
+        _show_revert_status(git_native_repo)
         return
 
     # Require commit_ref if not using status
@@ -631,10 +634,10 @@ def revert(commit_ref: str, dry_run: bool, interactive: bool, status: bool):
         # Parse the commit reference using our existing logic
         if ".." in commit_ref or "..." in commit_ref:
             # Range of commits
-            _revert_commit_range(claude_repo, commit_ref, dry_run, interactive)
+            _revert_commit_range(git_native_repo, commit_ref, dry_run, interactive)
         else:
             # Single commit
-            _revert_single_commit(claude_repo, commit_ref, dry_run, interactive)
+            _revert_single_commit(git_native_repo, commit_ref, dry_run, interactive)
 
     except Exception as e:
         console.print(f"[red]Error reverting changes: {e}[/red]")
@@ -667,8 +670,8 @@ def restore(commit_ref: str, dry_run: bool, interactive: bool, force: bool):
     project_root = _find_project_root()
     if not project_root:
         return
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -677,10 +680,14 @@ def restore(commit_ref: str, dry_run: bool, interactive: bool, force: bool):
         # Parse the commit reference using our existing logic
         if ".." in commit_ref or "..." in commit_ref:
             # Range of commits
-            _restore_commit_range(claude_repo, commit_ref, dry_run, interactive, force)
+            _restore_commit_range(
+                git_native_repo, commit_ref, dry_run, interactive, force
+            )
         else:
             # Single commit
-            _restore_single_commit(claude_repo, commit_ref, dry_run, interactive, force)
+            _restore_single_commit(
+                git_native_repo, commit_ref, dry_run, interactive, force
+            )
 
     except Exception as e:
         console.print(f"[red]Error restoring changes: {e}[/red]")
@@ -694,8 +701,8 @@ def find_by_parent(parent_hash: str):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -705,7 +712,7 @@ def find_by_parent(parent_hash: str):
         # Search through commits for matching parent hash
         matching_commits = []
 
-        for commit in claude_repo.repo.iter_commits():
+        for commit in git_native_repo.repo.iter_commits():
             try:
                 json_files = [
                     f
@@ -767,8 +774,8 @@ def conflicts(session_id: Optional[str], limit: int):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -777,17 +784,19 @@ def conflicts(session_id: Optional[str], limit: int):
     try:
         # Get recent commits to analyze
         if session_id:
-            session = claude_repo.get_session(session_id)
+            session = git_native_repo.get_session(session_id)
             if not session:
                 console.print(f"[red]Session {session_id} not found[/red]")
                 return
-            commits = claude_repo.get_commits_for_session(session_id)[:limit]
+            commits = git_native_repo.get_commits_for_session(session_id)[:limit]
         else:
             # Get recent commits from all sessions
             args = ["log", f"--max-count={limit}", "--format=%H"]
-            result = claude_repo.run_git_command(args)
-            commit_hashes = result.strip().split("\n") if result.strip() else []
-            commits = [claude_repo.repo.commit(h) for h in commit_hashes if h]
+            result = git_native_repo.run_git_command(args)
+            commit_hashes = (
+                result.stdout.strip().split("\n") if result.stdout.strip() else []
+            )
+            commits = [git_native_repo.repo.commit(h) for h in commit_hashes if h]
 
         conflicts_found = 0
 
@@ -879,15 +888,15 @@ def resolve(commit_hash: str):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
         return
 
     try:
-        commit = claude_repo.repo.commit(commit_hash)
+        commit = git_native_repo.repo.commit(commit_hash)
         console.print(
             f"[bold]Conflict resolution for commit {commit.hexsha[:8]}[/bold]"
         )
@@ -932,7 +941,7 @@ def resolve(commit_hash: str):
         console.print("[green]4.[/green] Skip this change and continue with others")
 
         # Show current parent repo status
-        current_status = claude_repo._get_parent_repo_status()
+        current_status = git_native_repo._get_parent_repo_status()
         if current_status and current_status.get("has_changes"):
             console.print(
                 "\n[yellow]⚠️  Parent repository currently has uncommitted changes[/yellow]"
@@ -954,8 +963,8 @@ def analyze(session_id: Optional[str], include_clean: bool):
     if not project_root:
         return
 
-    claude_repo = ClaudeGitRepository(project_root)
-    if not claude_repo.exists():
+    git_native_repo = GitNativeRepository(project_root)
+    if not git_native_repo.exists():
         console.print(
             "[red]Claude Git not initialized. Run 'claude-git init' first.[/red]"
         )
@@ -964,18 +973,20 @@ def analyze(session_id: Optional[str], include_clean: bool):
     try:
         # Get changes to analyze
         if session_id:
-            session = claude_repo.get_session(session_id)
+            session = git_native_repo.get_session(session_id)
             if not session:
                 console.print(f"[red]Session {session_id} not found[/red]")
                 return
-            commits = claude_repo.get_commits_for_session(session_id)
+            commits = git_native_repo.get_commits_for_session(session_id)
             console.print(f"[bold]Analysis for session {session_id[:8]}...[/bold]")
         else:
             # Get recent commits from all sessions
             args = ["log", "--max-count=50", "--format=%H"]
-            result = claude_repo.run_git_command(args)
-            commit_hashes = result.strip().split("\n") if result.strip() else []
-            commits = [claude_repo.repo.commit(h) for h in commit_hashes if h]
+            result = git_native_repo.run_git_command(args)
+            commit_hashes = (
+                result.stdout.strip().split("\n") if result.stdout.strip() else []
+            )
+            commits = [git_native_repo.repo.commit(h) for h in commit_hashes if h]
             console.print("[bold]Analysis of recent Claude changes[/bold]")
 
         # Analyze patterns
@@ -1356,16 +1367,16 @@ def _resolve_commit_ref_for_parent_repo(parent_repo, ref):
         ) from e
 
 
-def _resolve_commit_ref(claude_repo, ref):
+def _resolve_commit_ref(git_native_repo, ref):
     """Resolve commit reference (HEAD, HEAD~1, etc.) to actual commit hash."""
     try:
         if ref.startswith("HEAD"):
             # Handle HEAD~n syntax
             if ref == "HEAD":
-                return claude_repo.repo.head.commit.hexsha
+                return git_native_repo.repo.head.commit.hexsha
             if "~" in ref:
                 distance = int(ref.split("~")[1]) if ref.split("~")[1].isdigit() else 1
-                commit = claude_repo.repo.head.commit
+                commit = git_native_repo.repo.head.commit
                 actual_distance = 0
                 for _i in range(distance):
                     if commit.parents:
@@ -1379,7 +1390,7 @@ def _resolve_commit_ref(claude_repo, ref):
                 return commit.hexsha
         else:
             # Try to resolve as commit hash
-            commit = claude_repo.repo.commit(ref)
+            commit = git_native_repo.repo.commit(ref)
             return commit.hexsha
     except Exception as e:
         # Re-raise with git-like error message for invalid references
@@ -1390,7 +1401,9 @@ def _resolve_commit_ref(claude_repo, ref):
         ) from e
 
 
-def _handle_no_index_diff(claude_repo, parsed_args, verbose, tool=None, no_pager=False):
+def _handle_no_index_diff(
+    git_native_repo, parsed_args, verbose, tool=None, no_pager=False
+):
     """Handle --no-index diff for arbitrary file comparison."""
     paths = parsed_args.get("paths", [])
     if len(paths) != 2:
@@ -1403,7 +1416,7 @@ def _handle_no_index_diff(claude_repo, parsed_args, verbose, tool=None, no_pager
 
 
 def _handle_commit_range_diff(
-    claude_repo, parsed_args, parent_hash, verbose, tool=None, no_pager=False
+    git_native_repo, parsed_args, parent_hash, verbose, tool=None, no_pager=False
 ):
     """Handle commit range diff (commit1...commit2)."""
     commit_range = parsed_args["commit_range"]
@@ -1412,12 +1425,12 @@ def _handle_commit_range_diff(
         # Three-dot syntax: A...B
         # For git diff, this means diff between merge-base(A,B) and B
         start_ref, end_ref = commit_range.split("...")
-        start_commit = _resolve_commit_ref(claude_repo, start_ref)
-        end_commit = _resolve_commit_ref(claude_repo, end_ref)
+        start_commit = _resolve_commit_ref(git_native_repo, start_ref)
+        end_commit = _resolve_commit_ref(git_native_repo, end_ref)
 
         # Find merge base between the two commits
         try:
-            merge_base = claude_repo.repo.merge_base(start_commit, end_commit)
+            merge_base = git_native_repo.repo.merge_base(start_commit, end_commit)
             if merge_base:
                 # Use merge base as the actual start commit
                 actual_start = merge_base[0].hexsha
@@ -1434,8 +1447,8 @@ def _handle_commit_range_diff(
         # Two-dot syntax: A..B
         # For git diff, this is the same as "git diff A B"
         start_ref, end_ref = commit_range.split("..")
-        start_commit = _resolve_commit_ref(claude_repo, start_ref)
-        end_commit = _resolve_commit_ref(claude_repo, end_ref)
+        start_commit = _resolve_commit_ref(git_native_repo, start_ref)
+        end_commit = _resolve_commit_ref(git_native_repo, end_ref)
 
         console.print(
             f"[bold]Claude Changes Between {start_commit[:8]}..{end_commit[:8]} (two-dot)[/bold]\n"
@@ -1444,14 +1457,14 @@ def _handle_commit_range_diff(
 
     # Get commits in range
     try:
-        commits_in_range = list(claude_repo.repo.iter_commits(commits_range))
+        commits_in_range = list(git_native_repo.repo.iter_commits(commits_range))
         if not commits_in_range:
             console.print("[yellow]No commits found in range[/yellow]")
             return
 
         for commit in commits_in_range:
             # Analyze this specific commit
-            diff_results = claude_repo.get_meaningful_diff_for_commit(
+            diff_results = git_native_repo.get_meaningful_diff_for_commit(
                 commit.hexsha, parent_hash=parent_hash, paths=parsed_args.get("paths")
             )
             if diff_results and diff_results.get("changes_analyzed"):
@@ -1471,14 +1484,14 @@ def _handle_commit_range_diff(
 
 
 def _handle_single_commit_diff(
-    claude_repo, parsed_args, parent_hash, verbose, tool=None, no_pager=False
+    git_native_repo, parsed_args, parent_hash, verbose, tool=None, no_pager=False
 ):
     """Handle single commit diff - behaves like 'git diff <commit>' (diff from commit to working dir)."""
     commit_ref = parsed_args["single_commit"]
 
     # Test if the commit reference is valid by resolving it in the .claude-git repository
     try:
-        claude_git_repo = gitpython.Repo(claude_repo.claude_git_dir)
+        claude_git_repo = gitpython.Repo(git_native_repo.claude_git_dir)
         _resolve_commit_ref_for_parent_repo(claude_git_repo, commit_ref)
     except ValueError as e:
         # Print git-like error and exit with error code
@@ -1490,13 +1503,13 @@ def _handle_single_commit_diff(
     try:
         # Check if .claude-git directory exists and is a git repository
         if (
-            not claude_repo.claude_git_dir.exists()
-            or not (claude_repo.claude_git_dir / ".git").exists()
+            not git_native_repo.claude_git_dir.exists()
+            or not (git_native_repo.claude_git_dir / ".git").exists()
         ):
             return  # No Claude git repository exists
 
         # Check if .claude-git/files directory exists - if not, no Claude changes exist
-        claude_files_dir = claude_repo.project_root / ".claude-git" / "files"
+        claude_files_dir = git_native_repo.project_root / ".claude-git" / "files"
         if not claude_files_dir.exists():
             return  # No Claude changes exist, return empty like git diff
 
@@ -1506,7 +1519,7 @@ def _handle_single_commit_diff(
         )
 
         git_diff_result = subprocess.run(
-            cmd, cwd=claude_repo.claude_git_dir, capture_output=True, text=True
+            cmd, cwd=git_native_repo.claude_git_dir, capture_output=True, text=True
         )
 
         if git_diff_result.returncode != 0:
@@ -1576,7 +1589,7 @@ def _get_git_style_diff_text(change, external_tool: Optional[str] = None):
     if not diff_lines:
         return ""
 
-    # Skip single-line status messages (these are legacy format)
+    # Skip single-line status messages
     if len(diff_lines) == 1 and (
         diff_lines[0].startswith("✅") or diff_lines[0].startswith("❌")
     ):
@@ -1632,7 +1645,7 @@ def _get_git_style_diff_text(change, external_tool: Optional[str] = None):
 
 
 def _display_git_style_diff(change):
-    """Display a change in git diff style (legacy function for compatibility)."""
+    """Display a change in git diff style."""
     output = _get_git_style_diff_text(change)
     if output:
         # Print with colors
@@ -1661,7 +1674,7 @@ def _print_colored_diff_line(line):
 
 
 def _display_change_analysis(change, verbose=False):
-    """Display analysis for a single change (legacy format)."""
+    """Display analysis for a single change."""
     status_color = {
         "unchanged": "green",
         "user_modified": "yellow",
@@ -1783,16 +1796,16 @@ def _add_to_gitignore(project_root: Path) -> None:
 
 
 def _revert_single_commit(
-    claude_repo, commit_ref: str, dry_run: bool, interactive: bool
+    git_native_repo, commit_ref: str, dry_run: bool, interactive: bool
 ):
     """Revert changes from a single commit."""
     # Resolve the commit reference to a hash
-    commit_hash = _resolve_commit_ref(claude_repo, commit_ref)
+    commit_hash = _resolve_commit_ref(git_native_repo, commit_ref)
 
     console.print(f"[bold]Reverting Claude changes from {commit_hash[:8]}[/bold]")
 
     # Enhanced safety check - warn about potential conflicts
-    safety_check = _check_revert_safety(claude_repo, commit_hash)
+    safety_check = _check_revert_safety(git_native_repo, commit_hash)
     if safety_check["warnings"]:
         console.print("[yellow]⚠️  Safety warnings:[/yellow]")
         for warning in safety_check["warnings"]:
@@ -1805,7 +1818,7 @@ def _revert_single_commit(
             return
 
     # Try the traditional approach first (metadata-based)
-    diff_results = claude_repo.get_meaningful_diff_for_commit(commit_hash)
+    diff_results = git_native_repo.get_meaningful_diff_for_commit(commit_hash)
     traditional_changes = []
 
     if diff_results and diff_results.get("changes_analyzed"):
@@ -1827,13 +1840,13 @@ def _revert_single_commit(
             f"[dim]Using git-native revert approach for commit {commit_hash[:8]}[/dim]"
         )
         git_native_reverted = _revert_using_git_native_approach(
-            claude_repo, commit_hash, dry_run, interactive
+            git_native_repo, commit_hash, dry_run, interactive
         )
 
     # Apply traditional reverts
     traditional_reverted = 0
     for change in traditional_changes:
-        if _revert_single_change(change, dry_run, claude_repo.project_root):
+        if _revert_single_change(change, dry_run, git_native_repo.project_root):
             traditional_reverted += 1
 
     total_reverted = traditional_reverted + git_native_reverted
@@ -1851,7 +1864,7 @@ def _revert_single_commit(
                 f"[green]Successfully reverted {total_reverted} change(s)[/green]"
             )
             # Track this revert for restore navigation
-            _track_revert(claude_repo, commit_hash)
+            _track_revert(git_native_repo, commit_hash)
         else:
             console.print(
                 f"[yellow]No changes were reverted from commit {commit_hash[:8]}[/yellow]"
@@ -1859,7 +1872,7 @@ def _revert_single_commit(
 
 
 def _revert_commit_range(
-    claude_repo, commit_range: str, dry_run: bool, interactive: bool
+    git_native_repo, commit_range: str, dry_run: bool, interactive: bool
 ):
     """Revert changes from a range of commits."""
     # Parse the range using our existing logic
@@ -1868,8 +1881,8 @@ def _revert_commit_range(
     else:
         start_ref, end_ref = commit_range.split("..")
 
-    start_commit = _resolve_commit_ref(claude_repo, start_ref)
-    end_commit = _resolve_commit_ref(claude_repo, end_ref)
+    start_commit = _resolve_commit_ref(git_native_repo, start_ref)
+    end_commit = _resolve_commit_ref(git_native_repo, end_ref)
 
     console.print(
         f"[bold]Reverting Claude changes from {start_commit[:8]}..{end_commit[:8]}[/bold]"
@@ -1878,7 +1891,7 @@ def _revert_commit_range(
     # Get commits in range
     try:
         commits_in_range = list(
-            claude_repo.repo.iter_commits(f"{start_commit}..{end_commit}")
+            git_native_repo.repo.iter_commits(f"{start_commit}..{end_commit}")
         )
         if not commits_in_range:
             console.print("[yellow]No commits found in range[/yellow]")
@@ -1886,7 +1899,7 @@ def _revert_commit_range(
 
         all_changes = []
         for commit in reversed(commits_in_range):  # Process in chronological order
-            diff_results = claude_repo.get_meaningful_diff_for_commit(commit.hexsha)
+            diff_results = git_native_repo.get_meaningful_diff_for_commit(commit.hexsha)
             if diff_results and diff_results.get("changes_analyzed"):
                 all_changes.extend(diff_results["changes_analyzed"])
 
@@ -1918,7 +1931,7 @@ def _revert_commit_range(
         # Apply the reverts (in reverse chronological order to avoid conflicts)
         reverted_count = 0
         for change in reversed(changes_to_revert):
-            if _revert_single_change(change, dry_run, claude_repo.project_root):
+            if _revert_single_change(change, dry_run, git_native_repo.project_root):
                 reverted_count += 1
 
         if dry_run:
@@ -2248,17 +2261,17 @@ def _pipe_to_pager(content: str) -> None:
 
 
 def _restore_single_commit(
-    claude_repo, commit_ref: str, dry_run: bool, interactive: bool, force: bool
+    git_native_repo, commit_ref: str, dry_run: bool, interactive: bool, force: bool
 ):
     """Restore changes to a specific commit state."""
     # Resolve the commit reference to a hash
-    commit_hash = _resolve_commit_ref(claude_repo, commit_ref)
+    commit_hash = _resolve_commit_ref(git_native_repo, commit_ref)
 
     console.print(f"[bold]Restoring to Claude commit state {commit_hash[:8]}[/bold]")
 
     # First, check safety if not forced
     if not force:
-        safety_check = _check_restore_safety(claude_repo, commit_hash)
+        safety_check = _check_restore_safety(git_native_repo, commit_hash)
         if not safety_check["safe_to_restore"]:
             console.print("[red]⚠️  Unsafe to restore:[/red]")
             for warning in safety_check["warnings"]:
@@ -2268,7 +2281,7 @@ def _restore_single_commit(
                 return
 
     # Get all files in the target commit state using git-native approach
-    files_to_restore = _get_files_at_commit(claude_repo, commit_hash)
+    files_to_restore = _get_files_at_commit(git_native_repo, commit_hash)
 
     if not files_to_restore:
         console.print(f"[yellow]No files found in commit {commit_hash[:8]}[/yellow]")
@@ -2278,7 +2291,7 @@ def _restore_single_commit(
 
     # Find files to restore/modify
     for file_path, file_content in files_to_restore.items():
-        current_file = claude_repo.project_root / file_path
+        current_file = git_native_repo.project_root / file_path
 
         # Check if current file content differs from target state
         current_content = ""
@@ -2325,7 +2338,7 @@ def _restore_single_commit(
     # Apply the restores using git-native approach for exactness
     restored_count = 0
     for change in changes_to_restore:
-        if _apply_git_native_restore_change(change, dry_run, claude_repo):
+        if _apply_git_native_restore_change(change, dry_run, git_native_repo):
             restored_count += 1
 
     if dry_run:
@@ -2337,7 +2350,7 @@ def _restore_single_commit(
 
 
 def _restore_commit_range(
-    claude_repo, commit_range: str, dry_run: bool, interactive: bool, force: bool
+    git_native_repo, commit_range: str, dry_run: bool, interactive: bool, force: bool
 ):
     """Restore changes for a range of commits."""
     console.print(f"[bold]Restoring commit range: {commit_range}[/bold]")
@@ -2350,16 +2363,16 @@ def _restore_commit_range(
         start_ref, end_ref = commit_range.split("..", 1)
 
     # Restore to the end commit state
-    _restore_single_commit(claude_repo, end_ref, dry_run, interactive, force)
+    _restore_single_commit(git_native_repo, end_ref, dry_run, interactive, force)
 
 
-def _check_revert_safety(claude_repo, commit_hash: str) -> Dict:
+def _check_revert_safety(git_native_repo, commit_hash: str) -> Dict:
     """Check if it's safe to revert the specified commit."""
     safety_info = {"safe_to_revert": True, "warnings": [], "conflicts": []}
 
     try:
         # Check current parent repo status
-        current_status = claude_repo._get_parent_repo_status()
+        current_status = git_native_repo._get_parent_repo_status()
         if current_status and current_status.get("has_changes", False):
             safety_info["warnings"].append(
                 "Working directory has uncommitted changes - revert may cause conflicts"
@@ -2368,10 +2381,10 @@ def _check_revert_safety(claude_repo, commit_hash: str) -> Dict:
 
         # Get files that would be affected by revert using git-native approach
         try:
-            affected_files = _get_files_at_commit(claude_repo, commit_hash)
+            affected_files = _get_files_at_commit(git_native_repo, commit_hash)
 
             for file_path in affected_files:
-                claude_repo.project_root / file_path
+                git_native_repo.project_root / file_path
 
                 # Check if file was modified by user
                 if current_status:
@@ -2399,13 +2412,13 @@ def _check_revert_safety(claude_repo, commit_hash: str) -> Dict:
     return safety_info
 
 
-def _check_restore_safety(claude_repo, target_commit_hash: str) -> Dict:
+def _check_restore_safety(git_native_repo, target_commit_hash: str) -> Dict:
     """Check if it's safe to restore to the target commit state."""
     safety_info = {"safe_to_restore": True, "warnings": [], "conflicts": []}
 
     try:
         # Check current parent repo status
-        current_status = claude_repo._get_parent_repo_status()
+        current_status = git_native_repo._get_parent_repo_status()
         if current_status and current_status.get("has_changes", False):
             safety_info["warnings"].append(
                 "Working directory has uncommitted changes - restore may conflict"
@@ -2413,10 +2426,10 @@ def _check_restore_safety(claude_repo, target_commit_hash: str) -> Dict:
             safety_info["safe_to_restore"] = False
 
         # Get files that would be affected by restore
-        target_files = _get_files_at_commit(claude_repo, target_commit_hash)
+        target_files = _get_files_at_commit(git_native_repo, target_commit_hash)
 
         for file_path in target_files:
-            claude_repo.project_root / file_path
+            git_native_repo.project_root / file_path
 
             # Check if file was modified by user since last Claude change
             if current_status:
@@ -2440,13 +2453,13 @@ def _check_restore_safety(claude_repo, target_commit_hash: str) -> Dict:
     return safety_info
 
 
-def _get_files_at_commit(claude_repo, commit_hash: str) -> Dict[str, str]:
+def _get_files_at_commit(git_native_repo, commit_hash: str) -> Dict[str, str]:
     """Get all files and their content at a specific commit using git-native approach."""
     files = {}
 
     try:
         # Use git to get the file tree at the specific commit in .claude-git repo
-        result = claude_repo.run_git_command(
+        result = git_native_repo.run_git_command(
             ["ls-tree", "-r", "--name-only", commit_hash, "files/"]
         )
 
@@ -2462,7 +2475,7 @@ def _get_files_at_commit(claude_repo, commit_hash: str) -> Dict[str, str]:
 
                 # Get file content at this commit
                 try:
-                    content_result = claude_repo.run_git_command(
+                    content_result = git_native_repo.run_git_command(
                         ["show", f"{commit_hash}:{git_file_path}"]
                     )
                     files[actual_file_path] = content_result
@@ -2515,13 +2528,13 @@ def _apply_restore_change(change_info: Dict, dry_run: bool, project_root: Path) 
 
 
 def _revert_using_git_native_approach(
-    claude_repo, commit_hash: str, dry_run: bool, interactive: bool
+    git_native_repo, commit_hash: str, dry_run: bool, interactive: bool
 ) -> int:
     """Revert by restoring to the parent commit state (git-native approach)."""
     try:
         # Get the parent commit of the commit we're reverting
         parent_commits = (
-            claude_repo.run_git_command(
+            git_native_repo.run_git_command(
                 ["rev-list", "--parents", "-n", "1", commit_hash]
             )
             .strip()
@@ -2538,14 +2551,14 @@ def _revert_using_git_native_approach(
         console.print(f"[dim]Reverting to parent state: {parent_hash[:8]}[/dim]")
 
         # Get files that differ between parent and the commit we're reverting
-        current_files = _get_files_at_commit(claude_repo, commit_hash)
-        parent_files = _get_files_at_commit(claude_repo, parent_hash)
+        current_files = _get_files_at_commit(git_native_repo, commit_hash)
+        parent_files = _get_files_at_commit(git_native_repo, parent_hash)
 
         changes_to_apply = []
 
         # Find files that were added or modified in the commit we're reverting
         for file_path, commit_content in current_files.items():
-            current_file = claude_repo.project_root / file_path
+            current_file = git_native_repo.project_root / file_path
 
             if file_path in parent_files:
                 # File was modified - restore to parent version
@@ -2590,7 +2603,7 @@ def _revert_using_git_native_approach(
         # Restore modified files
         for change in changes_to_apply:
             if _apply_git_native_revert_change(
-                change, dry_run, claude_repo.project_root
+                change, dry_run, git_native_repo.project_root
             ):
                 reverted_count += 1
 
@@ -2630,13 +2643,13 @@ def _apply_git_native_revert_change(
 
 
 def _apply_git_native_restore_change(
-    change_info: Dict, dry_run: bool, claude_repo
+    change_info: Dict, dry_run: bool, git_native_repo
 ) -> bool:
     """Apply a git-native restore change for exact file state matching."""
     try:
         file_path = change_info["file_path"]
         target_content = change_info["target_content"]
-        current_file = claude_repo.project_root / file_path
+        current_file = git_native_repo.project_root / file_path
 
         if dry_run:
             action = change_info["action"]
@@ -2670,12 +2683,12 @@ def _apply_git_native_restore_change(
         return False
 
 
-def _track_revert(claude_repo, commit_hash: str):
+def _track_revert(git_native_repo, commit_hash: str):
     """Track a revert operation for easy restore navigation."""
     try:
         from datetime import datetime
 
-        revert_history_file = claude_repo.claude_git_dir / "revert_history.json"
+        revert_history_file = git_native_repo.claude_git_dir / "revert_history.json"
 
         # Load existing history
         history = []
@@ -2689,7 +2702,7 @@ def _track_revert(claude_repo, commit_hash: str):
         revert_entry = {
             "commit_hash": commit_hash,
             "reverted_at": datetime.now().isoformat(),
-            "parent_repo_hash": claude_repo._get_parent_repo_hash(),
+            "parent_repo_hash": git_native_repo._get_parent_repo_hash(),
             "restore_command": f"claude-git restore {commit_hash}",
         }
 
@@ -2704,9 +2717,9 @@ def _track_revert(claude_repo, commit_hash: str):
         console.print(f"[yellow]Warning: Could not track revert: {e}[/yellow]")
 
 
-def _show_revert_status(claude_repo):
+def _show_revert_status(git_native_repo):
     """Show revert history and restore navigation options."""
-    revert_history_file = claude_repo.claude_git_dir / "revert_history.json"
+    revert_history_file = git_native_repo.claude_git_dir / "revert_history.json"
 
     if not revert_history_file.exists():
         console.print("[yellow]No revert history found.[/yellow]")
@@ -2746,7 +2759,7 @@ def _show_revert_status(claude_repo):
             # Show commit info
             try:
                 # Get commit message from claude-git log
-                result = claude_repo.run_git_command(
+                result = git_native_repo.run_git_command(
                     ["show", "--format=%s", "--no-patch", commit_hash]
                 )
                 commit_msg = result.strip() if result else "No message"
@@ -3247,7 +3260,7 @@ def sync_user_changes():
         )
 
         # Perform initial file sync to copy all files from main repo
-        git_native_repo._initial_file_sync()
+        # No file sync needed - fork already has all files from git clone
         console.print("[green]✅ User changes synced to claude-git[/green]")
 
     except Exception as e:
@@ -3482,7 +3495,7 @@ def _handle_deleted_files(git_native_repo) -> None:
 
                 # Remove from claude-git repo
                 try:
-                    git_native_repo.claude_repo.index.remove([tracked_file])
+                    git_native_repo.git_native_repo.index.remove([tracked_file])
 
                     # Accumulate the deletion
                     git_native_repo.accumulate_change(

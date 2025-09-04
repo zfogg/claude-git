@@ -69,8 +69,8 @@ class GitNativeRepository:
         )
 
     def init(self) -> None:
-        """Initialize git-native dual-repository system."""
-        print(f"Initializing claude-git in {self.project_root}")
+        """Initialize fork-based dual-repository system."""
+        print(f"Initializing claude-git fork in {self.project_root}")
 
         # Ensure main repo exists
         if not (self.project_root / ".git").exists():
@@ -93,85 +93,151 @@ class GitNativeRepository:
                     f"Please remove it manually before initializing claude-git."
                 )
 
-        # Create claude-git directory
-        self.claude_git_dir.mkdir(exist_ok=True)
+        print("🚀 Creating git fork with shared objects for performance...")
 
-        # Initialize claude-git as proper git repository
-        self._claude_repo = Repo.init(self.claude_git_dir)
+        # Create fork using git clone with --reference for object sharing
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--reference",
+                str(self.project_root),  # Share objects for performance
+                str(self.project_root),  # Source repository
+                str(self.claude_git_dir),  # Destination (the fork)
+            ],
+            check=True,
+        )
+
+        # Initialize the forked repository
+        self._claude_repo = Repo(self.claude_git_dir)
 
         # Configure git user for claude-git repo
         with self._claude_repo.config_writer() as config:
-            config.set_value("user", "name", "Claude Git")
-            config.set_value("user", "email", "claude@anthropic.com")
+            config.set_value("user", "name", "Claude")
+            config.set_value("user", "email", "noreply@anthropic.com")
+
+        # Set up upstream remote pointing to the main repo
+        print("🔗 Setting up upstream remote...")
+        self._claude_repo.create_remote(
+            "upstream", f"..{''}"
+        )  # Points to parent directory (main repo)
 
         # Create config file
         config = {
-            "version": "2.0.0",  # New git-native architecture
+            "version": "3.0.0",  # Fork-based architecture
             "created": datetime.now().isoformat(),
             "project_root": str(self.project_root),
-            "architecture": "git-native-dual-repo",
+            "architecture": "fork-based",
             "main_repo_initial_commit": self._get_main_repo_commit(),
+            "upstream_remote": "upstream",
         }
         self.config_file.write_text(json.dumps(config, indent=2))
 
-        # Initial sync: Copy all files from main repo to claude-git repo
-        self._initial_file_sync()
-
-        # Create initial commit in claude-git
+        # Add config file and create initial commit
         self.claude_repo.index.add([".claude-git-config.json"])
         self.claude_repo.index.commit(
-            "Initialize claude-git dual-repository system\n\n"
-            f"Main-Repo: {self._get_main_repo_commit()}\n"
-            "Architecture: git-native with thinking-text commits"
+            "Initialize claude-git fork-based system\n\n"
+            f"Upstream-Repo: {self._get_main_repo_commit()}\n"
+            "Architecture: fork-based with auto-commit + squash workflow\n"
+            "\n🚀 Generated with [Claude Code](https://claude.ai/code)\n"
+            "\nCo-Authored-By: Claude <noreply@anthropic.com>"
         )
 
-        print("✅ Claude-git initialized successfully!")
+        print("✅ Claude-git fork initialized successfully!")
+        print(f"📁 Fork location: {self.claude_git_dir}")
+        print("🔄 Use 'git fetch upstream' to sync with main repo")
+        print("🌟 Ready for auto-commit + squash workflow!")
 
-    def _initial_file_sync(self) -> None:
-        """Perform initial synchronization of files from main repo to claude-git."""
-        print("🔄 Performing initial file synchronization...")
+    def sync_from_upstream(self) -> bool:
+        """Sync changes from upstream (main repo) using git pull.
 
-        # Get all files from main repo (excluding .git and .claude-git)
-        for item in self.project_root.rglob("*"):
-            # Skip git directories and the claude-git directory itself
-            if (
-                ".git" in item.parts
-                or ".claude-git" in item.parts
-                or item.name.startswith(".")
-            ):
-                continue
+        Returns:
+            True if sync successful, False otherwise
+        """
+        print("🔄 Syncing from upstream repository...")
 
-            if item.is_file():
-                # Calculate relative path from project root
-                rel_path = item.relative_to(self.project_root)
-
-                # Create corresponding file in claude-git repo
-                target_file = self.claude_git_dir / rel_path
-                target_file.parent.mkdir(parents=True, exist_ok=True)
-
-                try:
-                    shutil.copy2(item, target_file)
-                except (PermissionError, OSError) as e:
-                    print(f"⚠️  Could not copy {rel_path}: {e}")
-
-        # Stage all copied files
         try:
-            # Add all files except .claude-git-config.json (handled separately)
-            all_files = []
-            for item in self.claude_git_dir.rglob("*"):
-                if (
-                    item.is_file()
-                    and not item.name.startswith(".git")
-                    and item.name != ".claude-git-config.json"
-                ):
-                    rel_path = item.relative_to(self.claude_git_dir)
-                    all_files.append(str(rel_path))
+            # Fetch latest changes from upstream
+            upstream_remote = self.claude_repo.remote("upstream")
+            print("📥 Fetching upstream changes...")
+            upstream_remote.fetch()
 
-            if all_files:
-                self.claude_repo.index.add(all_files)
+            # Get current branch name
+            current_branch = self.claude_repo.active_branch.name
+
+            # Pull changes from upstream/main to current branch
+            print(f"🔀 Merging upstream/main into {current_branch}...")
+            result = subprocess.run(
+                ["git", "-C", str(self.claude_git_dir), "pull", "upstream", "main"],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode == 0:
+                print("✅ Successfully synced from upstream")
+                return True
+            # Handle merge conflicts
+            if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                self._handle_merge_conflict_guidance()
+                return False
+            print(f"❌ Git pull failed: {result.stderr}")
+            return False
 
         except Exception as e:
-            print(f"⚠️  Error during file staging: {e}")
+            print(f"❌ Unexpected error during sync: {e}")
+            return False
+
+    def _handle_merge_conflict_guidance(self):
+        """Provide guidance for resolving merge conflicts."""
+        print("\n🚨 MERGE CONFLICT DETECTED!")
+        print("The upstream changes conflict with Claude's work.")
+        print("\nResolution Options:")
+        print("1. 🛠  MANUAL RESOLUTION:")
+        print(f"   cd {self.claude_git_dir}")
+        print("   # Edit conflicted files to resolve conflicts")
+        print("   git add .")
+        print("   git commit")
+        print("\n2. 🔄 RESET AND RESTART:")
+        print(f"   cd {self.claude_git_dir}")
+        print("   git reset --hard upstream/main")
+        print("   # ⚠️  This will lose Claude's uncommitted work")
+        print("\n3. 🤖 AI-POWERED RESOLUTION (if available):")
+        print("   claude-git resolve-conflicts --auto")
+        print("\n4. 📱 GET HELP:")
+        print("   claude-git status")
+        print("   git status  # Show conflicted files")
+        print("\nAfter resolving, restart your Claude session.")
+        print("Claude will sync successfully on the next session start.")
+
+    def auto_commit_change(
+        self, message: str, files: Optional[List[str]] = None
+    ) -> str:
+        """Auto-commit a change to the claude-git fork.
+
+        Args:
+            message: Commit message
+            files: Optional list of specific files to commit (None = commit all changes)
+
+        Returns:
+            Commit hash
+        """
+        try:
+            # Add files to staging
+            if files:
+                self.claude_repo.index.add(files)
+            else:
+                # Add all changes
+                subprocess.run(
+                    ["git", "-C", str(self.claude_git_dir), "add", "."], check=True
+                )
+
+            # Create auto-commit
+            commit = self.claude_repo.index.commit(f"[auto] {message}")
+            return commit.hexsha
+
+        except Exception as e:
+            print(f"❌ Error creating auto-commit: {e}")
+            raise
 
     def _get_main_repo_commit(self) -> str:
         """Get current commit hash from main repository."""
@@ -194,8 +260,11 @@ class GitNativeRepository:
         """
         print(f"🚀 Starting Claude session: {session_id}")
 
-        # Commit any pending user changes first
-        self._commit_pending_user_changes()
+        # Sync from upstream first to ensure we have latest changes
+        if not self.sync_from_upstream():
+            print(
+                "⚠️  Warning: Could not sync from upstream, continuing with current state"
+            )
 
         # Check if multi-session branching should be used
         if use_branching:
@@ -1300,3 +1369,104 @@ Time: {datetime.now().isoformat()}
                 )
 
             self._test_monitor = None
+
+    # Legacy CLI compatibility methods
+
+    def list_sessions(self) -> List[Dict[str, Any]]:
+        """List all sessions (compatibility method)."""
+        try:
+            return list(self.get_active_sessions().values())
+        except Exception:
+            return []
+
+    def get_commits_for_session(self, session_id: str) -> List[Any]:
+        """Get commits for a session (compatibility method)."""
+        try:
+            # Try to find commits with session ID in git notes or message
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.claude_git_dir),
+                    "log",
+                    "--oneline",
+                    "--grep",
+                    f"Session: {session_id}",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            if result.returncode == 0:
+                commits = []
+                for line in result.stdout.strip().split("\n"):
+                    if line:
+                        commit_hash = line.split()[0]
+                        message = " ".join(line.split()[1:])
+                        commits.append({"hash": commit_hash, "message": message})
+                return commits
+        except Exception:
+            pass
+        return []
+
+    def run_git_command_with_pager(self, args: List[str]) -> None:
+        """Run git command with pager (compatibility method)."""
+        cmd = ["git", "-C", str(self.claude_git_dir)] + args
+        subprocess.run(cmd, check=False)
+
+    def run_git_command(self, args: List[str]) -> subprocess.CompletedProcess:
+        """Run git command (compatibility method)."""
+        cmd = ["git", "-C", str(self.claude_git_dir)] + args
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+    def get_meaningful_diff(self, *args, **kwargs) -> Dict[str, Any]:
+        """Get meaningful diff (compatibility method)."""
+        # Simple implementation - return minimal structure for compatibility
+        result = self.run_git_command(["diff"])
+        diff_text = result.stdout if result.returncode == 0 else ""
+
+        # Return expected dictionary format
+        return {"changes_analyzed": [{"diff": diff_text}] if diff_text.strip() else []}
+
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get session info (compatibility method)."""
+        sessions = self.get_active_sessions()
+        return sessions.get(session_id)
+
+    def _get_parent_repo_status(self) -> Dict[str, Any]:
+        """Get parent repo status (compatibility method)."""
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.project_root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            return {"has_changes": bool(result.stdout.strip()), "status": result.stdout}
+        except Exception:
+            return {"has_changes": False, "status": ""}
+
+    def get_meaningful_diff_for_commit(self, commit_hash: str) -> str:
+        """Get meaningful diff for commit (compatibility method)."""
+        result = self.run_git_command(["show", "--stat", commit_hash])
+        return result.stdout if result.returncode == 0 else ""
+
+    def _get_parent_repo_hash(self) -> str:
+        """Get parent repo current commit hash (compatibility method)."""
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.project_root), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    @property
+    def repo(self) -> Repo:
+        """Compatibility property for accessing the git repo."""
+        return self.claude_repo

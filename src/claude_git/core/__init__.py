@@ -1,5 +1,5 @@
 """Core functionality for Claude Git."""
 
-from .repository import ClaudeGitRepository
+from .git_native_repository import GitNativeRepository
 
-__all__ = ["ClaudeGitRepository"]
+__all__ = ["GitNativeRepository"]
